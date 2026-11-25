@@ -22,7 +22,7 @@ export default function App() {
   const [sortBy, setSortBy] = useState("risk");
   const currency = "TSh";
   const [discount, setDiscount] = useState(0);
-  const [previousPrices, setPreviousPrices] = useState({});
+  const [recoveryDays, setRecoveryDays] = useState(7);
   const [panel, setPanel] = useState("Details");
   const [showAdd, setShowAdd] = useState(false);
 
@@ -66,10 +66,7 @@ export default function App() {
       setSummary(radarData.summary);
       setItems(freshItems);
 
-      if (selectedItem?.id) {
-        const fresh = freshItems.find((i) => i.id === selectedItem.id);
-        setSelectedItem(fresh || null);
-      }
+      setSelectedItem(prev => prev ? freshItems.find(i => i.id === prev.id) || null : null);
 
       setBasket((prev) => {
         const next = {};
@@ -103,7 +100,7 @@ export default function App() {
     setIsEditing(false);
     setEditName(item.name);
     setEditCost(item.unit_cost);
-    setEditSellingPrice(item.selling_price ?? item.unit_cost);
+    setEditSellingPrice(item.base_price ?? item.selling_price ?? item.unit_cost);
     setEditExpiry(item.expiry_date || "");
   };
 
@@ -161,6 +158,7 @@ export default function App() {
           items: basketLines.map((l) => ({
             item_id: l.item.id,
             units_sold: l.qty,
+            expected_price: l.unitPrice,
           })),
         }),
       });
@@ -363,27 +361,21 @@ export default function App() {
   const safeDiscount = selectedItem && selectedItem.selling_price > 0 ? Math.max(0, Math.min(100, Math.floor((1-selectedItem.unit_cost/selectedItem.selling_price)*100))) : 0;
   const canApplyRecovery = selectedItem && !selectedItem.is_expired && selectedItem.stock_qty > 0 && discount > 0 && recoveryPrice > 0 && recoveryPrice >= selectedItem.unit_cost && recoveryPrice < selectedItem.selling_price;
 
+  const activeCampaign = selectedItem?.recovery_campaigns?.find(c => c.active);
   const saveRecoveryPrice = async (restore = false) => {
-    if (!selectedItem || submitting || selectedItem.is_expired || (!restore && !canApplyRecovery)) return;
-    const item = selectedItem;
-    const price = restore ? previousPrices[item.id] : recoveryPrice;
-    if (!Number.isFinite(price) || price <= 0 || price < item.unit_cost) return;
-    if (!window.confirm(`${restore ? "Restore" : "Apply"} ${formatMoney(price)} as the selling price for ${item.name}? This changes future checkout prices for all units.`)) return;
-    setSubmitting(true);
-    setError("");
+    if (!selectedItem || submitting || (!restore && (!canApplyRecovery || activeCampaign))) return;
+    if (!window.confirm(restore ? "End this campaign and restore the base price?" : `Start a recovery campaign for up to ${recoveryDays} days (limited by expiry)?`)) return;
+    setSubmitting(true); setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/items/${item.id}`, {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selling_price: price })
+      const res = await fetch(`${API_BASE}/api/items/${selectedItem.id}/recovery${restore ? "/end" : ""}`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: restore ? undefined : JSON.stringify({discount, days: Number(recoveryDays)})
       });
-      if (!res.ok) { const data = await res.json().catch(() => ({})); throw new Error(data.detail || `Error ${res.status}`); }
-      setPreviousPrices(prev => { const next = {...prev}; if (restore) delete next[item.id]; else if (!(item.id in next)) next[item.id] = Number(item.selling_price); return next; });
-      setDiscount(0);
-      setIsEditing(false);
-      showNotice(`${restore ? "Price restored" : "Recovery price applied"}: ${item.name} · ${formatMoney(price)}`);
+      if (!res.ok) { const data = await res.json(); throw new Error(data.detail || `Error ${res.status}`); }
+      setDiscount(0); setIsEditing(false);
+      showNotice(restore ? "Campaign ended" : "Campaign started");
       await fetchRadar();
-    } catch (err) { setError(`Could not update recovery price: ${err.message}`); }
-    finally { setSubmitting(false); }
+    } catch(err) { setError(err.message); } finally { setSubmitting(false); }
   };
 
   const handleDeleteItem = async () => {
@@ -840,7 +832,7 @@ export default function App() {
                   <div style={styles.skuText}>{(selectedItem.risk_reasons || []).join(" · ") || "No scored risk factors"}</div>
                 </div>
                 {panel === "Recovery" && selectedItem.is_expired && <p style={styles.muted}>Expired stock cannot be sold. Review disposal options.</p>}
-                {panel === "Recovery" && !selectedItem.is_expired && <div style={styles.simBox}>
+                {panel === "Recovery" && !selectedItem.is_expired && !activeCampaign && <div style={styles.simBox}>
                   <strong>Capital recovery simulator</strong>
                   <p>Discount: {discount}%</p>
                   <input aria-label="Discount percentage" type="range" min="0" max={safeDiscount} disabled={submitting || safeDiscount === 0 || selectedItem.stock_qty <= 0} value={discount} onChange={e => setDiscount(Number(e.target.value))} style={{width:"100%"}} />
@@ -849,20 +841,42 @@ export default function App() {
                   <div>Gross profit: {formatMoney(selectedItem.stock_qty * (recoveryPrice-selectedItem.unit_cost))}</div>
                   <div>Maximum whole-percent break-even discount: {safeDiscount}%</div>
                   <small>Estimates assume all units sell; excludes operating expenses. Applying changes the live selling price, not historical sales.</small>
-                  <button type="button" style={styles.counterTapBtn} disabled={submitting || !canApplyRecovery} onClick={()=>saveRecoveryPrice()}>Apply recovery price</button>
-                  {previousPrices[selectedItem.id] != null && <button type="button" style={{...styles.secondaryBtn,width:"100%",marginTop:8}} disabled={submitting || previousPrices[selectedItem.id] < selectedItem.unit_cost} onClick={()=>saveRecoveryPrice(true)}>Restore original price ({formatMoney(previousPrices[selectedItem.id])})</button>}
-                  <small>Restore is available during this session only. You can also edit the price in Details.</small>
+                  <p>Suggested starting discount: {Math.min(safeDiscount, selectedItem.risk_score >= 70 ? 20 : selectedItem.risk_score >= 40 ? 10 : 5)}% (rule-based, not a demand prediction).</p>
+                  <label>Maximum duration <select value={recoveryDays} onChange={e=>setRecoveryDays(Number(e.target.value))}>{[1,3,7,14,30].map(d=><option key={d} value={d}>{d} days</option>)}</select></label>
+                  <p><small>Campaigns end no later than the end of the expiry date (EAT).</small></p>
+                  <button type="button" style={styles.counterTapBtn} disabled={submitting || loading || !canApplyRecovery} onClick={()=>saveRecoveryPrice()}>Start recovery campaign</button>
+                </div>}
+                {panel === "Recovery" && activeCampaign && <div style={styles.simBox}>
+                  <strong>Active recovery campaign</strong>
+                  <p>{formatMoney(activeCampaign.original_price)} → {formatMoney(activeCampaign.price)}</p>
+                  <p>Ends: {new Date(activeCampaign.effective_ends_at || activeCampaign.ends_at).toLocaleString("en-TZ", {timeZone:"Africa/Dar_es_Salaam"})} EAT</p>
+                  <div className="sr-recovery-performance">
+                    <strong>{activeCampaign.performance}</strong>
+                    <div className="sr-recovery-metrics">
+                      <div><small>Campaign sales/day</small><b>{activeCampaign.campaign_daily_sales ?? "Pending"}</b></div>
+                      <div><small>Required sales/day</small><b>{activeCampaign.required_daily_sales ?? "—"}</b></div>
+                      <div><small>Capital recovered</small><b>{formatMoney(activeCampaign.capital_recovered)}</b></div>
+                      <div><small>Current stock cost</small><b>{formatMoney(activeCampaign.remaining_capital)}</b></div>
+                    </div>
+                    {activeCampaign.campaign_daily_sales != null && activeCampaign.required_daily_sales > 0 && <progress aria-label="Clearance pace versus target" max={100} value={Math.min(100,100*activeCampaign.campaign_daily_sales/activeCampaign.required_daily_sales)}/>}
+                    <small>Target uses remaining stock and time. Campaign pace needs 24 hours of observations; this is not a demand forecast.</small>
+                  </div>
+                  <button style={styles.secondaryBtn} disabled={submitting || loading} onClick={()=>saveRecoveryPrice(true)}>End campaign</button>
+                </div>}
+                {panel === "Recovery" && <div style={styles.simBox}><strong>Campaign history & actual recovery</strong>
+                  {!(selectedItem.recovery_campaigns || []).length && <p>No campaigns yet.</p>}
+                  {(selectedItem.recovery_campaigns || []).map(c=><div key={c.id} className="sr-campaign"><strong>{c.discount}% off · {c.active ? "Active" : "Ended"}</strong><small>{new Date(c.started_at).toLocaleDateString("en-TZ", {timeZone:"Africa/Dar_es_Salaam"})}</small><div>Units sold: {c.units}</div><div>Revenue: {formatMoney(c.revenue)}</div><div>Inventory cost recovered: {formatMoney(c.capital_recovered)}</div><div>Gross profit: {formatMoney(c.gross_profit)}</div></div>)}
                 </div>}
                 <div style={styles.simBox}>
                   <div style={styles.simStats}>
                     <div>
                       Profit per unit: <strong>{formatMoney(selectedItem.unit_profit)}</strong>
                     </div>
-                    <div>
+                    {!activeCampaign && <div>
                       Safe max discount:{" "}
                       <strong>{selectedItem.max_safe_discount_pct}% off</strong> (floor{" "}
                       {formatMoney(selectedItem.unit_cost)})
-                    </div>
+                    </div>}
                     {selectedItem.expiry_date && (
                       <div>
                         Expiry: <strong>{selectedItem.expiry_date}</strong> (
@@ -943,7 +957,8 @@ export default function App() {
                     <div style={{ display: "flex", gap: "8px" }}>
                       <button
                         type="button"
-                        onClick={() => setIsEditing(true)}
+                        disabled={!!activeCampaign}
+                         onClick={() => setIsEditing(true)}
                         style={{ ...styles.secondaryBtn, flex: 1 }}
                       >
                         Edit Item
