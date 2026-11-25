@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import "./stockradar.css";
+import Predictions from "./Predictions";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 
@@ -408,7 +409,7 @@ export default function App() {
   };
 
   const navigate = (next) => { setPage(next); setFilter("All"); setSearchQuery(""); };
-  const nav = [["Overview","◈"],["Inventory Radar","◎"],["Point of Sale","▤"],["Capital Recovery","↗"],["Business Advisor","✦"]];
+  const nav = [["Overview","◈"],["Inventory Radar","◎"],["Point of Sale","▤"],["Capital Recovery","↗"],["Business Advisor","✦"],["Predictive Intelligence","↝"]];
   const priority = [...items].filter(i => i.stock_qty > 0 && i.status !== "Healthy").sort((a,b) => (b.risk_score || 0)-(a.risk_score || 0) || b.tied_up_value-a.tied_up_value);
   const capital = Number(summary?.total_tied_up_value || 0);
   const atRisk = Number(summary?.at_risk_capital || 0);
@@ -422,7 +423,8 @@ export default function App() {
         <div className="sr-sidebar-foot">StockRadar v1.0<br/><small>Independent portfolio project</small></div>
       </aside>
       <main className="sr-main">
-      <header className="sr-header"><div><div className="sr-eyebrow">WORKSPACE / {page.toUpperCase()}</div><h1>{page}</h1><p>{({Overview:"Monitor your inventory. Protect your capital.","Inventory Radar":"Manage products and investigate inventory risks.","Point of Sale":"Build a basket and record customer sales.","Capital Recovery":"Explore discount scenarios before making decisions.","Business Advisor":"Prioritize actions using your inventory data."})[page]}</p></div><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading ? "Refreshing…" : "↻ Refresh data"}</button></header>
+      <header className="sr-header"><div><div className="sr-eyebrow">WORKSPACE / {page.toUpperCase()}</div><h1>{page}</h1><p>{({Overview:"Monitor your inventory. Protect your capital.","Inventory Radar":"Manage products and investigate inventory risks.","Point of Sale":"Build a basket and record customer sales.","Capital Recovery":"Explore discount scenarios before making decisions.","Business Advisor":"Prioritize actions using your inventory data.","Predictive Intelligence":"Forecast demand and anticipate inventory exposure."})[page]}</p></div><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading ? "Refreshing…" : "↻ Refresh data"}</button></header>
+      {page === "Predictive Intelligence" && <Predictions api={API_BASE} refresh={loading} money={formatMoney}/>}
       {toast && <div style={styles.toastBox}>{toast}</div>}
       {error && <div style={styles.errorBox}>{error}</div>}
 

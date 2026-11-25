@@ -1,3 +1,4 @@
+from forecast import forecast
 import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -634,3 +635,27 @@ def list_actions():
         return [{"id": d.id, **d.to_dict()} for d in docs]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/predictions")
+def get_predictions(demo: bool = False):
+    now = datetime.now(timezone.utc)
+    tz = ZoneInfo("Africa/Dar_es_Salaam")
+    today = now.astimezone(tz).date()
+    rows = []
+    for doc in db.collection("demo_items" if demo else "items").stream():
+        item = ItemInput(**doc.to_dict())
+        valid = [(parse_iso_dt(e.timestamp), e.units_sold) for e in item.sales_events]
+        valid = [(dt, qty) for dt, qty in valid if dt and dt <= now and qty > 0]
+        created = parse_iso_dt(item.created_at)
+        start = created.astimezone(tz).date() + timedelta(days=1) if created else today
+        start = max(start, today - timedelta(days=30))
+        dates = [start + timedelta(days=i) for i in range(max(0, (today-start).days))]
+        counts = {d: 0 for d in dates}
+        for dt, qty in valid:
+            day = dt.astimezone(tz).date()
+            if day in counts:
+                counts[day] += qty
+        price = item.selling_price if item.selling_price > 0 else item.unit_cost
+        result = forecast(list(counts.values()), item.stock_qty, item.unit_cost, price, parse_expiry_days(item.expiry_date, today))
+        rows.append({"id": doc.id, "name": item.name, "stock": item.stock_qty, "history": [{"date": d.isoformat(), "units": counts[d]} for d in dates], **result})
+    return {"as_of": today.isoformat(), "demo": demo, "items": rows}
