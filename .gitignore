@@ -1,0 +1,32 @@
+# Firebase credentials
+serviceAccountKey.json
+*firebase-adminsdk*.json
+*service-account*.json
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+.pytest_cache/
+
+# Node.js
+node_modules/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Logs
+*.log
