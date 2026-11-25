@@ -22,6 +22,9 @@ export default function App() {
   const [sortBy, setSortBy] = useState("risk");
   const currency = "TSh";
   const [discount, setDiscount] = useState(0);
+  const [previousPrices, setPreviousPrices] = useState({});
+  const [panel, setPanel] = useState("Details");
+  const [showAdd, setShowAdd] = useState(false);
 
   const [form, setForm] = useState(INITIAL_FORM);
   const [loading, setLoading] = useState(true);
@@ -72,7 +75,7 @@ export default function App() {
         const next = {};
         for (const [id, qty] of Object.entries(prev)) {
           const match = freshItems.find((i) => i.id === id);
-          if (match && match.stock_qty > 0) {
+          if (match && !match.is_expired && match.stock_qty > 0) {
             next[id] = Math.min(qty, match.stock_qty);
           }
         }
@@ -92,7 +95,10 @@ export default function App() {
   }, []);
 
   const openInspector = (item) => {
+    if (submitting) return;
     setSelectedItem(item);
+    setPanel(prev => prev === "Recovery" ? "Recovery" : "Details");
+    setDiscount(0);
     setRestockInput(10);
     setIsEditing(false);
     setEditName(item.name);
@@ -103,6 +109,7 @@ export default function App() {
 
   const addToBasket = (item, qtyToAdd = 1) => {
     if (item.is_expired) return;
+    setPanel("Basket");
     if (!item?.id || item.stock_qty <= 0) return;
     setBasket((prev) => {
       const current = prev[item.id] || 0;
@@ -231,6 +238,7 @@ export default function App() {
         throw new Error(errData.detail || `Error ${res.status}`);
       }
       setForm(INITIAL_FORM);
+      setShowAdd(false);
       showNotice(`Added "${payload.name}"`);
       await fetchRadar();
     } catch (err) {
@@ -351,6 +359,33 @@ export default function App() {
     }
   };
 
+  const recoveryPrice = selectedItem ? Math.ceil(Number(selectedItem.selling_price) * (1-discount/100) * 100 - 1e-8)/100 : 0;
+  const safeDiscount = selectedItem && selectedItem.selling_price > 0 ? Math.max(0, Math.min(100, Math.floor((1-selectedItem.unit_cost/selectedItem.selling_price)*100))) : 0;
+  const canApplyRecovery = selectedItem && !selectedItem.is_expired && selectedItem.stock_qty > 0 && discount > 0 && recoveryPrice > 0 && recoveryPrice >= selectedItem.unit_cost && recoveryPrice < selectedItem.selling_price;
+
+  const saveRecoveryPrice = async (restore = false) => {
+    if (!selectedItem || submitting || selectedItem.is_expired || (!restore && !canApplyRecovery)) return;
+    const item = selectedItem;
+    const price = restore ? previousPrices[item.id] : recoveryPrice;
+    if (!Number.isFinite(price) || price <= 0 || price < item.unit_cost) return;
+    if (!window.confirm(`${restore ? "Restore" : "Apply"} ${formatMoney(price)} as the selling price for ${item.name}? This changes future checkout prices for all units.`)) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/items/${item.id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ selling_price: price })
+      });
+      if (!res.ok) { const data = await res.json().catch(() => ({})); throw new Error(data.detail || `Error ${res.status}`); }
+      setPreviousPrices(prev => { const next = {...prev}; if (restore) delete next[item.id]; else if (!(item.id in next)) next[item.id] = Number(item.selling_price); return next; });
+      setDiscount(0);
+      setIsEditing(false);
+      showNotice(`${restore ? "Price restored" : "Recovery price applied"}: ${item.name} · ${formatMoney(price)}`);
+      await fetchRadar();
+    } catch (err) { setError(`Could not update recovery price: ${err.message}`); }
+    finally { setSubmitting(false); }
+  };
+
   const handleDeleteItem = async () => {
     if (!selectedItem?.id) return;
     if (!window.confirm(`Remove "${selectedItem.name}" from inventory?`)) return;
@@ -409,7 +444,7 @@ export default function App() {
   };
 
   const navigate = (next) => { setPage(next); setFilter("All"); setSearchQuery(""); };
-  const nav = [["Overview","◈"],["Inventory Radar","◎"],["Point of Sale","▤"],["Capital Recovery","↗"],["Business Advisor","✦"],["Predictive Intelligence","↝"]];
+  const nav = [["Overview","◈"],["Inventory Workspace","◎"],["Predictive Intelligence","↝"]];
   const priority = [...items].filter(i => i.stock_qty > 0 && i.status !== "Healthy").sort((a,b) => (b.risk_score || 0)-(a.risk_score || 0) || b.tied_up_value-a.tied_up_value);
   const capital = Number(summary?.total_tied_up_value || 0);
   const atRisk = Number(summary?.at_risk_capital || 0);
@@ -419,11 +454,11 @@ export default function App() {
       <aside className="sr-sidebar">
         <div className="sr-brand"><span className="sr-logo">◎</span><div>Stock<span>Radar</span><small>INVENTORY INTELLIGENCE</small></div></div>
         <div className="sr-nav-label">WORKSPACE</div>
-        <nav aria-label="Main navigation">{nav.map(([name,icon]) => <button key={name} aria-current={page===name ? "page" : undefined} className={page===name ? "active" : ""} onClick={()=>navigate(name)}><span>{icon}</span>{name}{name==="Point of Sale" && basketTotalUnits>0 && <b>{basketTotalUnits}</b>}</button>)}</nav>
+        <nav aria-label="Main navigation">{nav.map(([name,icon]) => <button key={name} aria-current={page===name ? "page" : undefined} className={page===name ? "active" : ""} onClick={()=>navigate(name)}><span>{icon}</span>{name}{name==="Inventory Workspace" && basketTotalUnits>0 && <b>{basketTotalUnits}</b>}</button>)}</nav>
         <div className="sr-sidebar-foot">StockRadar v1.0<br/><small>Independent portfolio project</small></div>
       </aside>
       <main className="sr-main">
-      <header className="sr-header"><div><div className="sr-eyebrow">WORKSPACE / {page.toUpperCase()}</div><h1>{page}</h1><p>{({Overview:"Monitor your inventory. Protect your capital.","Inventory Radar":"Manage products and investigate inventory risks.","Point of Sale":"Build a basket and record customer sales.","Capital Recovery":"Explore discount scenarios before making decisions.","Business Advisor":"Prioritize actions using your inventory data.","Predictive Intelligence":"Forecast demand and anticipate inventory exposure."})[page]}</p></div><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading ? "Refreshing…" : "↻ Refresh data"}</button></header>
+      <header className="sr-header"><div><div className="sr-eyebrow">WORKSPACE / {page.toUpperCase()}</div><h1>{page}</h1><p>{({Overview:"Monitor your inventory. Protect your capital.","Inventory Workspace":"Manage products, record sales and recover capital.","Predictive Intelligence":"Forecast demand and anticipate inventory exposure."})[page]}</p></div><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading ? "Refreshing…" : "↻ Refresh data"}</button></header>
       {page === "Predictive Intelligence" && <Predictions api={API_BASE} refresh={loading} money={formatMoney}/>}
       {toast && <div style={styles.toastBox}>{toast}</div>}
       {error && <div style={styles.errorBox}>{error}</div>}
@@ -484,8 +519,9 @@ export default function App() {
         <section className="sr-panel"><h2>Capital exposure</h2><p>Inventory cost classified as slowing or dead-stock risk.</p><div className="sr-big">{riskPct.toFixed(1)}%</div><div className="sr-meter" role="img" aria-label={`${riskPct.toFixed(1)} percent capital at risk`}><span style={{width:`${riskPct}%`}}/></div><div className="sr-between"><span>At risk <strong>{formatMoney(atRisk)}</strong></span><span>Total <strong>{formatMoney(capital)}</strong></span></div></section>
         <section className="sr-panel"><h2>Inventory health</h2><p>Number of tracked products by status.</p>{[["Healthy",summary?.healthy,"#10b981"],["Slowing down",summary?.slowing_down,"#f59e0b"],["Dead-stock risk",summary?.dead_stock_risk,"#ef4444"]].map(([label,count,color])=><div className="sr-health" key={label}><div className="sr-between"><span>{label}</span><strong>{count ?? 0}</strong></div><div className="sr-meter"><span style={{width:`${summary?.total_items ? 100*(count||0)/summary.total_items : 0}%`,background:color}}/></div></div>)}</section>
       </div>}
-      {(page === "Overview" || page === "Business Advisor") && <section className="sr-panel"><h2>Priority recommendations</h2><p>Rule-based insights from your current inventory, ranked by risk score.</p>{priority.length===0 ? <p>No at-risk stocked products to review.</p> : (page === "Overview" ? priority.slice(0,5) : priority).map(item=><div className="sr-recommendation" key={item.id}><div><strong>{item.name}</strong><p>{item.recommended_action}</p><small>{(item.risk_reasons||[]).join(" · ")}</small></div><div><strong>{formatMoney(item.tied_up_value)}</strong><small>Risk {item.risk_score ?? "—"}/100</small><button style={styles.secondaryBtn} onClick={()=>{openInspector(item);navigate("Inventory Radar");}}>Review item</button></div></div>)}</section>}
-      {page === "Inventory Radar" && (
+      {page === "Overview" && <section className="sr-panel"><h2>Priority recommendations</h2><p>Rule-based insights from your current inventory, ranked by risk score.</p>{priority.length===0 ? <p>No at-risk stocked products to review.</p> : priority.slice(0,5).map(item=><div className="sr-recommendation" key={item.id}><div><strong>{item.name}</strong><p>{item.recommended_action}</p><small>{(item.risk_reasons||[]).join(" · ")}</small></div><div><strong>{formatMoney(item.tied_up_value)}</strong><small>Risk {item.risk_score ?? "—"}/100</small><button style={styles.secondaryBtn} onClick={()=>{openInspector(item);navigate("Inventory Workspace");}}>Review item</button></div></div>)}</section>}
+      {page === "Inventory Workspace" && <div className="sr-workspace-toolbar"><button style={styles.primaryBtn} aria-expanded={showAdd} onClick={()=>setShowAdd(v=>!v)}>{showAdd ? "Close add form" : "+ Add product"}</button><button style={styles.secondaryBtn} onClick={()=>setPanel("Basket")}>Customer basket · {basketTotalUnits} units</button></div>}
+      {page === "Inventory Workspace" && showAdd && (
       <section style={styles.card}>
         <h2 style={styles.sectionTitle}>Add Inventory Item</h2>
         <form onSubmit={handleAddItem} style={styles.formGrid}>
@@ -546,11 +582,11 @@ export default function App() {
       </section>
 
       )}
-      {(page === "Inventory Radar" || page === "Point of Sale" || page === "Capital Recovery") && <div className="sr-workspace" style={styles.mainSplit}>
+      {page === "Inventory Workspace" && <div className="sr-workspace" style={styles.mainSplit}>
         <section style={{ ...styles.card, flex: 2, minWidth: 0 }}>
           <div style={styles.tableHeader}>
             <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
-              {page === "Point of Sale" ? "Product catalog" : "Inventory watchlist"}
+              Inventory watchlist
             </h2>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
               <input
@@ -599,14 +635,14 @@ export default function App() {
             <p style={styles.muted}>Scanning inventory from Firestore...</p>
           ) : visibleItems.length === 0 ? (
             <p style={styles.muted}>
-              No matching items found. Add an item above or adjust your search/filter.
+              No matching items found. Add a product or adjust your search/filter.
             </p>
           ) : (
             <div style={{ overflowX: "auto" }}>
               <table style={styles.table}>
                 <thead>
                   <tr>
-                    {page === "Point of Sale" && <th style={styles.th}>Quick Add</th>}
+                    <th style={styles.th}>Quick Add</th>
                     <th style={styles.th}>Item Name</th>
                     <th style={styles.th}>Sell Price</th>
                     <th style={styles.th}>Left in Stock</th>
@@ -629,7 +665,7 @@ export default function App() {
                           background: isSelected ? "#eff6ff" : "transparent",
                         }}
                       >
-                        {page === "Point of Sale" && <td
+                        <td
                           style={styles.td}
                           onClick={(e) => e.stopPropagation()}
                         >
@@ -641,7 +677,7 @@ export default function App() {
                           >
                             + Basket{inBasketQty > 0 ? ` (${inBasketQty})` : ""}
                           </button>
-                        </td>}
+                        </td>
                         <td style={styles.td}>
                           <button className="sr-item-link" onClick={()=>openInspector(item)}>{item.name}</button>
                           <div style={styles.skuText}>
@@ -687,7 +723,8 @@ export default function App() {
 
         {/* Right Side: Customer Basket + Streamlined Selected-Item Panel */}
         <aside className="sr-inspector" style={{ flex: 1, minWidth: 0 }}>
-          {page === "Point of Sale" && (
+          <div className="sr-action-tabs" role="group" aria-label="Workspace actions">{["Details","Recovery","Basket"].map(t=><button key={t} aria-pressed={panel===t} onClick={()=>setPanel(t)}>{t}{t==="Basket" ? ` (${basketTotalUnits})` : ""}</button>)}</div>
+          {panel === "Basket" && (
           <div style={{ ...styles.card, border: "2px solid #0f172a" }}>
             <div style={styles.basketHeader}>
               <h2 style={{ ...styles.sectionTitle, margin: 0 }}>Customer Basket (Checkout)</h2>
@@ -725,7 +762,7 @@ export default function App() {
                         <strong style={{ minWidth: "20px", textAlign: "center" }}>{qty}</strong>
                         <button
                           type="button"
-                          disabled={qty >= item.stock_qty}
+                          disabled={item.is_expired || qty >= item.stock_qty}
                           onClick={() => updateBasketQty(item.id, qty + 1, item.stock_qty)}
                           style={styles.qtyStepBtn}
                         >
@@ -752,7 +789,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleCompleteBasketSale}
-                  disabled={submitting}
+                  disabled={submitting || basketLines.some(l=>l.item.is_expired)}
                   style={styles.counterTapBtn}
                 >
                   {submitting
@@ -775,11 +812,11 @@ export default function App() {
           </div>
 
           )}
-          {page !== "Point of Sale" && <div style={styles.card}>
-            <h2 style={styles.sectionTitle}>{page === "Capital Recovery" ? "Recovery scenario" : "Selected item actions"}</h2>
+          {panel !== "Basket" && <div style={styles.card}>
+            <h2 style={styles.sectionTitle}>{panel === "Recovery" ? "Recovery scenario" : "Selected item actions"}</h2>
             {!selectedItem ? (
               <p style={styles.muted}>
-                Click any item row to highlight it in <strong>light blue</strong> for 1-tap single-unit sales, undo, restock, or editing.
+                Select a product from the inventory table to view its details or simulate recovery.
               </p>
             ) : (
               <div>
@@ -799,16 +836,22 @@ export default function App() {
 
                 <div style={styles.simBox}>
                   <strong>Risk score: {selectedItem.risk_score ?? "—"}/100</strong>
+                  <p>{selectedItem.recommended_action}</p>
                   <div style={styles.skuText}>{(selectedItem.risk_reasons || []).join(" · ") || "No scored risk factors"}</div>
                 </div>
-                {!selectedItem.is_expired && <div style={styles.simBox}>
+                {panel === "Recovery" && selectedItem.is_expired && <p style={styles.muted}>Expired stock cannot be sold. Review disposal options.</p>}
+                {panel === "Recovery" && !selectedItem.is_expired && <div style={styles.simBox}>
                   <strong>Capital recovery simulator</strong>
                   <p>Discount: {discount}%</p>
-                  <input aria-label="Discount percentage" type="range" min="0" max="60" value={discount} onChange={e => setDiscount(Number(e.target.value))} style={{width:"100%"}} />
-                  <div>New unit price: {formatMoney(selectedItem.selling_price * (1-discount/100))}</div>
-                  <div>Potential revenue: {formatMoney(selectedItem.stock_qty * selectedItem.selling_price * (1-discount/100))}</div>
-                  <div>Gross profit: {formatMoney(selectedItem.stock_qty * (selectedItem.selling_price * (1-discount/100)-selectedItem.unit_cost))}</div>
-                  <small>Scenario only: assumes all units sell; excludes operating expenses.</small>
+                  <input aria-label="Discount percentage" type="range" min="0" max={safeDiscount} disabled={submitting || safeDiscount === 0 || selectedItem.stock_qty <= 0} value={discount} onChange={e => setDiscount(Number(e.target.value))} style={{width:"100%"}} />
+                  <div>New unit price: {formatMoney(recoveryPrice)}</div>
+                  <div>Potential revenue: {formatMoney(selectedItem.stock_qty * recoveryPrice)}</div>
+                  <div>Gross profit: {formatMoney(selectedItem.stock_qty * (recoveryPrice-selectedItem.unit_cost))}</div>
+                  <div>Maximum whole-percent break-even discount: {safeDiscount}%</div>
+                  <small>Estimates assume all units sell; excludes operating expenses. Applying changes the live selling price, not historical sales.</small>
+                  <button type="button" style={styles.counterTapBtn} disabled={submitting || !canApplyRecovery} onClick={()=>saveRecoveryPrice()}>Apply recovery price</button>
+                  {previousPrices[selectedItem.id] != null && <button type="button" style={{...styles.secondaryBtn,width:"100%",marginTop:8}} disabled={submitting || previousPrices[selectedItem.id] < selectedItem.unit_cost} onClick={()=>saveRecoveryPrice(true)}>Restore original price ({formatMoney(previousPrices[selectedItem.id])})</button>}
+                  <small>Restore is available during this session only. You can also edit the price in Details.</small>
                 </div>}
                 <div style={styles.simBox}>
                   <div style={styles.simStats}>
@@ -838,7 +881,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {page === "Inventory Radar" && <>
+                {panel === "Details" && <>
                 <button
                   type="button"
                   onClick={handleSellOneUnit}
