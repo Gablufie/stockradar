@@ -13,6 +13,11 @@ const INITIAL_FORM = {
 };
 
 export default function App() {
+  const [lang, setLang] = useState(() => localStorage.getItem("sr-language") === "sw" ? "sw" : "en");
+  useEffect(() => { localStorage.setItem("sr-language", lang); }, [lang]);
+  const t = (en, sw) => lang === "sw" ? sw : en;
+  const labels = {Overview:t("Home","Mwanzo"), "Inventory Workspace":t("My Stock","Bidhaa"), "Predictive Intelligence":t("Reports","Ripoti"), Details:t("Details","Maelezo"), Recovery:t("Offers","Ofa"), Basket:t("Basket","Kikapu"), All:t("All","Zote"), "Dead-Stock Risk":t("Not selling / at risk","Haziuzi vizuri"), "Slowing Down":t("Selling slowly","Zinauzika polepole"), Healthy:t("Selling normally","Zinauzika kawaida"), "Reorder Soon":t("Buy more soon","Nunua zaidi karibuni"), "Expiring Soon":t("Expiring soon","Muda unaisha karibuni")};
+  const [advanced, setAdvanced] = useState(false);
   const [page, setPage] = useState("Overview");
   useEffect(() => { document.title = "StockRadar | Inventory Intelligence"; }, []);
   const [summary, setSummary] = useState(null);
@@ -415,7 +420,7 @@ export default function App() {
       }
       if (
         searchQuery.trim() &&
-        !item.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
+        !`${item.name} ${item.sku || ""}`.toLowerCase().includes(searchQuery.trim().toLowerCase())
       ) {
         return false;
       }
@@ -438,6 +443,12 @@ export default function App() {
   const navigate = (next) => { setPage(next); setFilter("All"); setSearchQuery(""); };
   const nav = [["Overview","◈"],["Inventory Workspace","◎"],["Predictive Intelligence","↝"]];
   const priority = [...items].filter(i => i.stock_qty > 0 && i.status !== "Healthy").sort((a,b) => (b.risk_score || 0)-(a.risk_score || 0) || b.tied_up_value-a.tied_up_value);
+  const bestSellers = items.filter(i=>i.units_sold_today>0).sort((a,b)=>b.units_sold_today-a.units_sold_today).slice(0,3);
+  const attention = items.filter(i=>i.stock_qty>0&&(i.is_expired||i.expiring_soon||i.reorder_soon||i.status!=="Healthy")).sort((a,b)=>Number(b.is_expired)-Number(a.is_expired)||(b.risk_score||0)-(a.risk_score||0));
+  const duplicateNames = new Set(items.filter((item,index)=>items.some((other,j)=>j!==index && other.name.trim().toLowerCase()===item.name.trim().toLowerCase())).map(item=>item.name.trim().toLowerCase()));
+  const productName = item => duplicateNames.has(item.name.trim().toLowerCase()) && item.sku ? `${item.name} (${item.sku})` : item.name;
+  const urgent = attention.find(i=>i.is_expired) || [...attention].filter(i=>i.expiring_soon).sort((a,b)=>a.days_to_expiry-b.days_to_expiry)[0] || attention.find(i=>i.reorder_soon) || attention[0];
+  const tip = !summary ? null : urgent ? urgent.is_expired ? t(`${productName(urgent)} has expired. Remove it from sale.`,`${productName(urgent)} imeisha muda wake. Usiiuze.`) : urgent.expiring_soon ? t(`${productName(urgent)}: ${urgent.stock_qty} left. Aim to sell ${Math.ceil(urgent.stock_qty/Math.max(1,urgent.days_to_expiry+1))} per day before the expiry date passes.`,`${productName(urgent)}: zimebaki ${urgent.stock_qty}. Lenga kuuza ${Math.ceil(urgent.stock_qty/Math.max(1,urgent.days_to_expiry+1))} kila siku kabla muda wake haujaisha.`) : urgent.reorder_soon ? t(`Check ${productName(urgent)} before your next stock purchase.`,`Angalia ${productName(urgent)} kabla ya kununua bidhaa tena.`) : t(`${productName(urgent)} is selling slowly. Consider a special offer.`,`${productName(urgent)} inauzika polepole. Fikiria kuweka ofa.`) : t("Keep recording every sale so you can see how your shop is doing.","Endelea kurekodi kila mauzo ili ujue maendeleo ya duka lako.");
   const capital = Number(summary?.total_tied_up_value || 0);
   const atRisk = Number(summary?.at_risk_capital || 0);
   const riskPct = capital > 0 ? Math.min(100, Math.max(0, atRisk/capital*100)) : 0;
@@ -445,74 +456,41 @@ export default function App() {
     <div className="sr-shell">
       <aside className="sr-sidebar">
         <div className="sr-brand"><span className="sr-logo">◎</span><div>Stock<span>Radar</span><small>INVENTORY INTELLIGENCE</small></div></div>
-        <div className="sr-nav-label">WORKSPACE</div>
-        <nav aria-label="Main navigation">{nav.map(([name,icon]) => <button key={name} aria-current={page===name ? "page" : undefined} className={page===name ? "active" : ""} onClick={()=>navigate(name)}><span>{icon}</span>{name}{name==="Inventory Workspace" && basketTotalUnits>0 && <b>{basketTotalUnits}</b>}</button>)}</nav>
+        <div className="sr-nav-label">{t("MY SHOP","DUKA LANGU")}</div>
+        <nav aria-label="Main navigation">{nav.map(([name,icon]) => <button key={name} aria-current={page===name ? "page" : undefined} className={page===name ? "active" : ""} onClick={()=>navigate(name)}><span>{icon}</span>{labels[name]}{name==="Inventory Workspace" && basketTotalUnits>0 && <b>{basketTotalUnits}</b>}</button>)}</nav>
         <div className="sr-sidebar-foot">StockRadar v1.0<br/><small>Independent portfolio project</small></div>
       </aside>
       <main className="sr-main">
-      <header className="sr-header"><div><div className="sr-eyebrow">WORKSPACE / {page.toUpperCase()}</div><h1>{page}</h1><p>{({Overview:"Monitor your inventory. Protect your capital.","Inventory Workspace":"Manage products, record sales and recover capital.","Predictive Intelligence":"Forecast demand and anticipate inventory exposure."})[page]}</p></div><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading ? "Refreshing…" : "↻ Refresh data"}</button></header>
-      {page === "Predictive Intelligence" && <Predictions api={API_BASE} refresh={loading} money={formatMoney}/>}
+      <header className="sr-header"><div><h1>{labels[page]}</h1></div><div className="sr-header-actions"><select aria-label="Language / Lugha" value={lang} onChange={e=>setLang(e.target.value)}><option value="en">English</option><option value="sw">Kiswahili</option></select><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading?t("Loading…","Inapakia…"):t("Refresh","Onyesha upya")}</button></div></header>
+      {page === "Predictive Intelligence" && <><section className="sr-panel"><h2>{t("Shop report today","Ripoti ya duka leo")}</h2>{summary && <div className="sr-simple-kpis"><KpiCard label={t("Sales today","Mauzo ya leo")} value={formatMoney(summary.cash_collected_today)}/><KpiCard label={t("Gross profit today","Faida ghafi leo")} value={formatMoney(summary.profit_today)}/><KpiCard label={t("Units sold today","Bidhaa zilizouzwa leo")} value={summary.units_sold_today}/><KpiCard label={t("Money in stock","Mtaji kwenye bidhaa")} value={formatMoney(capital)}/></div>}<p>{t("Gross profit excludes shop expenses.","Faida ghafi haijatoa gharama za uendeshaji.")}</p><button style={styles.secondaryBtn} onClick={()=>setAdvanced(v=>!v)}>{advanced?t("Hide detailed forecasts","Ficha makadirio"):t("Show detailed forecasts (English)","Onyesha makadirio (Kiingereza)")}</button></section>{advanced && <Predictions api={API_BASE} refresh={loading} money={formatMoney}/>}</>}
       {toast && <div style={styles.toastBox}>{toast}</div>}
       {error && <div style={styles.errorBox}>{error}</div>}
 
-      {page === "Overview" && summary && (
-        <section style={styles.todayBar}>
-          <div>
-            <span style={styles.todayLabel}>TODAY&apos;S COUNTER RECAP</span>
-            <div style={styles.todayStats}>
-              <span>
-                Sold Today: <strong>{summary.units_sold_today ?? 0} units</strong>
-              </span>
-              <span>·</span>
-              <span>
-                Cash Collected Today:{" "}
-                <strong>{formatMoney(summary.cash_collected_today ?? 0)}</strong>
-              </span>
-              <span>·</span>
-              <span style={{ color: "#86efac" }}>
-                Profit Earned Today: <strong>{formatMoney(summary.profit_today ?? 0)}</strong>
-              </span>
-              <span>·</span>
-              <span>
-                Expiring Soon: <strong>{summary.expiring_soon_count ?? 0}</strong>
-              </span>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {page === "Overview" && summary && (
-        <section style={styles.kpiGrid}>
-          <KpiCard label="Total Tracked Items" value={summary.total_items} />
-          <KpiCard
-            label="Dead-Stock Risk"
-            value={summary.dead_stock_risk}
-            accent="#dc2626"
-          />
-          <KpiCard
-            label="Slowing Down"
-            value={summary.slowing_down}
-            accent="#d97706"
-          />
-          <KpiCard label="Healthy" value={summary.healthy} accent="#16a34a" />
-          <KpiCard
-            label="At-Risk Capital"
-            value={formatMoney(summary.at_risk_capital ?? summary.total_tied_up_value)}
-            accent="#b91c1c"
-          />
-          <KpiCard
-            label="Total Tied-Up Cost"
-            value={formatMoney(summary.total_tied_up_value)}
-          />
-        </section>
-      )}
-
-      {page === "Overview" && <div className="sr-overview-grid">
-        <section className="sr-panel"><h2>Capital exposure</h2><p>Inventory cost classified as slowing or dead-stock risk.</p><div className="sr-big">{riskPct.toFixed(1)}%</div><div className="sr-meter" role="img" aria-label={`${riskPct.toFixed(1)} percent capital at risk`}><span style={{width:`${riskPct}%`}}/></div><div className="sr-between"><span>At risk <strong>{formatMoney(atRisk)}</strong></span><span>Total <strong>{formatMoney(capital)}</strong></span></div></section>
-        <section className="sr-panel"><h2>Inventory health</h2><p>Number of tracked products by status.</p>{[["Healthy",summary?.healthy,"#10b981"],["Slowing down",summary?.slowing_down,"#f59e0b"],["Dead-stock risk",summary?.dead_stock_risk,"#ef4444"]].map(([label,count,color])=><div className="sr-health" key={label}><div className="sr-between"><span>{label}</span><strong>{count ?? 0}</strong></div><div className="sr-meter"><span style={{width:`${summary?.total_items ? 100*(count||0)/summary.total_items : 0}%`,background:color}}/></div></div>)}</section>
-      </div>}
-      {page === "Overview" && <section className="sr-panel"><h2>Priority recommendations</h2><p>Rule-based insights from your current inventory, ranked by risk score.</p>{priority.length===0 ? <p>No at-risk stocked products to review.</p> : priority.slice(0,5).map(item=><div className="sr-recommendation" key={item.id}><div><strong>{item.name}</strong><p>{item.recommended_action}</p><small>{(item.risk_reasons||[]).join(" · ")}</small></div><div><strong>{formatMoney(item.tied_up_value)}</strong><small>Risk {item.risk_score ?? "—"}/100</small><button style={styles.secondaryBtn} onClick={()=>{openInspector(item);navigate("Inventory Workspace");}}>Review item</button></div></div>)}</section>}
-      {page === "Inventory Workspace" && <div className="sr-workspace-toolbar"><button style={styles.primaryBtn} aria-expanded={showAdd} onClick={()=>setShowAdd(v=>!v)}>{showAdd ? "Close add form" : "+ Add product"}</button><button style={styles.secondaryBtn} onClick={()=>setPanel("Basket")}>Customer basket · {basketTotalUnits} units</button></div>}
+      {page === "Overview" && <>
+        <section className="sr-home-welcome"><h2>{t("Welcome to your shop!","Karibu dukani!")}</h2><p>{t("Here is how your shop is doing today.","Hivi ndivyo duka lako linavyoendelea leo.")}</p></section>
+        {summary && <div className="sr-home-kpis">{[
+          ["↗",t("Sales today","Mauzo ya leo"),formatMoney(summary.cash_collected_today)],
+          ["+",t("Gross profit today","Faida ghafi leo"),formatMoney(summary.profit_today)],
+          ["✓",t("Units sold today","Idadi iliyouzwa leo"),summary.units_sold_today ?? 0],
+          ["▦",t("Products in stock","Aina za bidhaa zilizopo"),items.filter(i=>i.stock_qty>0).length]
+        ].map(([icon,label,value],index)=><div className={`sr-home-stat tone-${index}`} key={label}><span aria-hidden="true">{icon}</span><small>{label}</small><strong>{value}</strong></div>)}</div>}
+        <div className="sr-quick-actions sr-home-actions"><button onClick={()=>{navigate("Inventory Workspace");setPanel("Basket");setShowAdd(false)}}>{t("Record a sale","Rekodi mauzo")}</button><button onClick={()=>{navigate("Inventory Workspace");setShowAdd(true)}}>{t("Add a product","Ongeza bidhaa mpya")}</button></div>
+        {tip && <section className="sr-daily-tip" data-tone={urgent?.is_expired?"danger":urgent?.expiring_soon?"warning":"normal"}><div><h2>{t("Today's business tip","Ushauri wa biashara leo")}</h2><p>{tip}</p></div>{urgent && <button style={styles.secondaryBtn} onClick={()=>{navigate("Inventory Workspace");openInspector(urgent);setShowAdd(false);setPanel(urgent.is_expired||urgent.reorder_soon?"Details":"Recovery")}}>{t("View product","Angalia bidhaa")}</button>}</section>}
+        <div className="sr-home-columns">
+          <section className="sr-panel"><h2>{t("Best sellers today","Bidhaa zilizouzwa zaidi leo")}</h2><p>{t("Ranked by units sold today.","Kwa idadi iliyouzwa leo.")}</p>
+          {!summary ? <p>{t("Sales data unavailable.","Taarifa za mauzo hazipatikani.")}</p> : bestSellers.length===0 ? <p>{t("No sales recorded today yet.","Hakuna mauzo yaliyorekodiwa leo bado.")}</p> : bestSellers.map(i=><div className="sr-home-seller" key={i.id}><div><strong>{productName(i)}</strong><span>{i.units_sold_today} {t("sold","zimeuzwa")}</span></div><progress max={bestSellers[0].units_sold_today} value={i.units_sold_today} aria-label={`${i.name}: ${i.units_sold_today}`}/></div>)}
+          {summary && <div className="sr-home-note">{summary.cash_collected_today>0?t(`For every TSh 1,000 sold today, your gross profit was about ${formatMoney(Math.round(1000*summary.profit_today/summary.cash_collected_today))}, before shop expenses.`,`Kwa kila TSh 1,000 ya mauzo leo, faida ghafi ilikuwa takriban ${formatMoney(Math.round(1000*summary.profit_today/summary.cash_collected_today))}, kabla ya gharama za duka.`):t("Record a sale to see today's profit margin.","Rekodi mauzo kuona asilimia ya faida leo.")}</div>}
+          </section>
+          <section className="sr-panel"><h2>{t("Stock at a glance","Muhtasari wa bidhaa")}</h2><p>{t("What to check before buying more.","Cha kuangalia kabla ya kununua zaidi.")}</p>{[
+            [t("Expiring soon or expired","Muda unaisha au umeisha"),items.filter(i=>i.stock_qty>0&&(i.expiring_soon||i.is_expired)).length,"Expiring Soon"],
+            [t("Buy more soon","Nunua zaidi karibuni"),items.filter(i=>i.reorder_soon&&!i.is_expired).length,"Reorder Soon"],
+            [t("Selling slowly or at risk","Zinauzika polepole au ziko hatarini"),priority.length,"All"],
+            [t("Active special offers","Ofa zinazoendelea"),items.filter(i=>i.recovery_campaigns?.some(c=>c.active)).length,"All"]
+          ].map(([label,count,target])=><button className="sr-home-alert" data-tone={count>0&&target==="Expiring Soon"?"warning":count>0&&target==="Reorder Soon"?"warning":"normal"} key={label} onClick={()=>{navigate("Inventory Workspace");setFilter(target);setPanel("Details");setShowAdd(false)}}><span>{label}</span><strong>{count} ›</strong></button>)}<div className="sr-home-note">{t("Money in stock","Mtaji kwenye bidhaa")}: <strong>{summary?formatMoney(capital):"—"}</strong></div></section>
+        </div>
+        <section className="sr-panel"><h2>{t("Needs your attention","Bidhaa zinazohitaji umakini")}</h2>{attention.length===0 && <p>{summary?t("Nothing urgent to review right now.","Hakuna jambo la haraka kwa sasa."):t("Stock data unavailable.","Taarifa za bidhaa hazipatikani.")}</p>}{attention.slice(0,8).map(i=><div className="sr-recommendation sr-attention" data-tone={i.is_expired?"danger":i.expiring_soon?"warning":"normal"} key={i.id}><div><strong>{productName(i)}</strong><p>{i.is_expired?t("Expired — do not sell","Muda umeisha — usiuze"):i.expiring_soon?(i.days_to_expiry===0?t("Expires today","Muda unaisha leo"):t(`Expires in ${i.days_to_expiry} days`,`Muda unaisha baada ya siku ${i.days_to_expiry}`)):i.reorder_soon?t("Check whether to buy more","Angalia kama unahitaji kununua zaidi"):labels[i.status]} · {i.stock_qty} {t("left","zimebaki")}</p></div><button style={styles.secondaryBtn} onClick={()=>{openInspector(i);navigate("Inventory Workspace");setPanel(i.reorder_soon||i.is_expired?"Details":"Recovery")}}>{t("Review","Angalia")}</button></div>)}</section>
+      </>}
+      {page === "Inventory Workspace" && <div className="sr-workspace-toolbar"><button style={styles.primaryBtn} aria-expanded={showAdd} onClick={()=>setShowAdd(v=>!v)}>{showAdd ? t("Close form","Funga") : t("+ Add product","+ Ongeza bidhaa")}</button><button style={styles.secondaryBtn} onClick={()=>setPanel("Basket")}>{t("Basket","Kikapu")} · {basketTotalUnits}</button></div>}
       {page === "Inventory Workspace" && showAdd && (
       <section style={styles.card}>
         <h2 style={styles.sectionTitle}>Add Inventory Item</h2>
@@ -578,7 +556,7 @@ export default function App() {
         <section style={{ ...styles.card, flex: 2, minWidth: 0 }}>
           <div style={styles.tableHeader}>
             <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
-              Inventory watchlist
+              {t("Products","Bidhaa")}
             </h2>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
               <input
@@ -610,7 +588,7 @@ export default function App() {
               "Expiring Soon",
             ].map((tab) => (
               <button
-                key={tab}
+                key={labels[tab]}
                 onClick={() => setFilter(tab)}
                 style={{
                   ...styles.filterBtn,
@@ -618,7 +596,7 @@ export default function App() {
                   color: filter === tab ? "#ffffff" : "#334155",
                 }}
               >
-                {tab}
+                {labels[tab]}
               </button>
             ))}
           </div>
@@ -630,96 +608,17 @@ export default function App() {
               No matching items found. Add a product or adjust your search/filter.
             </p>
           ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Quick Add</th>
-                    <th style={styles.th}>Item Name</th>
-                    <th style={styles.th}>Sell Price</th>
-                    <th style={styles.th}>Left in Stock</th>
-                    <th style={styles.th}>Pace (7d → 7d)</th>
-                    <th style={styles.th}>Status</th>
-                    <th style={styles.th}>Recommended Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleItems.map((item, idx) => {
-                    const isSelected = selectedItem?.id && selectedItem.id === item.id;
-                    const inBasketQty = basket[item.id] || 0;
-                    return (
-                      <tr
-                        key={item.id || `${item.name}-${idx}`}
-                        onClick={() => openInspector(item)}
-                        style={{
-                          ...styles.tr,
-                          cursor: "pointer",
-                          background: isSelected ? "#eff6ff" : "transparent",
-                        }}
-                      >
-                        <td
-                          style={styles.td}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <button
-                            type="button"
-                            disabled={item.is_expired || item.stock_qty <= 0 || inBasketQty >= item.stock_qty}
-                            onClick={() => addToBasket(item, 1)}
-                            style={styles.basketAddBtn}
-                          >
-                            + Basket{inBasketQty > 0 ? ` (${inBasketQty})` : ""}
-                          </button>
-                        </td>
-                        <td style={styles.td}>
-                          <button className="sr-item-link" onClick={()=>openInspector(item)}>{item.name}</button>
-                          <div style={styles.skuText}>
-                            Cost: {formatMoney(item.unit_cost)} · Profit/unit:{" "}
-                            {formatMoney(item.unit_profit)}
-                          </div>
-                          {item.reorder_soon && (
-                            <span style={styles.reorderPill}>Reorder Soon</span>
-                          )}
-                          {item.is_expired && (
-                            <span style={styles.expiredPill}>Expired ({item.expiry_date})</span>
-                          )}
-                          {item.expiring_soon && !item.is_expired && (
-                            <span style={styles.expiringPill}>
-                              Expires in {item.days_to_expiry}d
-                            </span>
-                          )}
-                        </td>
-                        <td style={styles.td}>
-                          <strong>{formatMoney(item.selling_price)}</strong>
-                        </td>
-                        <td style={styles.td}>
-                          <strong>{item.stock_qty}</strong> left
-                        </td>
-                        <td style={styles.td}>
-                          {item.prior_daily_sales}/d → <strong>{item.recent_daily_sales}/d</strong>
-                        </td>
-                        <td style={styles.td}>
-                          <span style={{ ...styles.badge, ...badgeStyle(item.status) }}>
-                            {item.status}
-                          </span>
-                          <div style={styles.skuText}>Risk: {item.risk_score ?? "—"}/100</div>
-                        </td>
-                        <td style={styles.td}>{item.recommended_action}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <div className="sr-product-list">{visibleItems.map(item=><article key={item.id} className="sr-product" data-selected={selectedItem?.id===item.id}><button className="sr-item-link" onClick={()=>{openInspector(item);setPanel("Details")}}>{productName(item)}</button><strong>{formatMoney(item.selling_price)}</strong><small>{item.stock_qty} {t("left","zimebaki")} · {item.is_expired?t("Expired","Muda umeisha"):item.expiring_soon?t("Expiring soon","Muda unaisha karibuni"):labels[item.status]}</small><button style={styles.basketAddBtn} disabled={item.is_expired||item.stock_qty<=0||(basket[item.id]||0)>=item.stock_qty} onClick={()=>addToBasket(item)}>{t("+ Sell","+ Uza")}{basket[item.id]?` (${basket[item.id]})`:""}</button></article>)}</div>
           )}
         </section>
 
         {/* Right Side: Customer Basket + Streamlined Selected-Item Panel */}
         <aside className="sr-inspector" style={{ flex: 1, minWidth: 0 }}>
-          <div className="sr-action-tabs" role="group" aria-label="Workspace actions">{["Details","Recovery","Basket"].map(t=><button key={t} aria-pressed={panel===t} onClick={()=>setPanel(t)}>{t}{t==="Basket" ? ` (${basketTotalUnits})` : ""}</button>)}</div>
+          <div className="sr-action-tabs" role="group" aria-label="Workspace actions">{["Details","Recovery","Basket"].map(t=><button key={t} aria-pressed={panel===t} onClick={()=>setPanel(t)}>{labels[t]}{t==="Basket" ? ` (${basketTotalUnits})` : ""}</button>)}</div>
           {panel === "Basket" && (
           <div style={{ ...styles.card, border: "2px solid #0f172a" }}>
             <div style={styles.basketHeader}>
-              <h2 style={{ ...styles.sectionTitle, margin: 0 }}>Customer Basket (Checkout)</h2>
+              <h2 style={{ ...styles.sectionTitle, margin: 0 }}>{t("Customer basket","Kikapu cha mteja")}</h2>
               {basketLines.length > 0 && (
                 <button type="button" onClick={clearBasket} style={styles.clearLink}>
                   Clear
@@ -805,7 +704,7 @@ export default function App() {
 
           )}
           {panel !== "Basket" && <div style={styles.card}>
-            <h2 style={styles.sectionTitle}>{panel === "Recovery" ? "Recovery scenario" : "Selected item actions"}</h2>
+            <h2 style={styles.sectionTitle}>{panel === "Recovery" ? t("Special offers","Ofa maalum") : t("Product details","Maelezo ya bidhaa")}</h2>
             {!selectedItem ? (
               <p style={styles.muted}>
                 Select a product from the inventory table to view its details or simulate recovery.
@@ -822,18 +721,13 @@ export default function App() {
                     </div>
                   </div>
                   <span style={{ ...styles.badge, ...badgeStyle(selectedItem.status) }}>
-                    {selectedItem.status}
+                    {labels[selectedItem.status]}
                   </span>
                 </div>
 
-                <div style={styles.simBox}>
-                  <strong>Risk score: {selectedItem.risk_score ?? "—"}/100</strong>
-                  <p>{selectedItem.recommended_action}</p>
-                  <div style={styles.skuText}>{(selectedItem.risk_reasons || []).join(" · ") || "No scored risk factors"}</div>
-                </div>
                 {panel === "Recovery" && selectedItem.is_expired && <p style={styles.muted}>Expired stock cannot be sold. Review disposal options.</p>}
                 {panel === "Recovery" && !selectedItem.is_expired && !activeCampaign && <div style={styles.simBox}>
-                  <strong>Capital recovery simulator</strong>
+                  <strong>{t("Set a discount","Weka punguzo")}</strong>
                   <p>Discount: {discount}%</p>
                   <input aria-label="Discount percentage" type="range" min="0" max={safeDiscount} disabled={submitting || safeDiscount === 0 || selectedItem.stock_qty <= 0} value={discount} onChange={e => setDiscount(Number(e.target.value))} style={{width:"100%"}} />
                   <div>New unit price: {formatMoney(recoveryPrice)}</div>
@@ -844,10 +738,10 @@ export default function App() {
                   <p>Suggested starting discount: {Math.min(safeDiscount, selectedItem.risk_score >= 70 ? 20 : selectedItem.risk_score >= 40 ? 10 : 5)}% (rule-based, not a demand prediction).</p>
                   <label>Maximum duration <select value={recoveryDays} onChange={e=>setRecoveryDays(Number(e.target.value))}>{[1,3,7,14,30].map(d=><option key={d} value={d}>{d} days</option>)}</select></label>
                   <p><small>Campaigns end no later than the end of the expiry date (EAT).</small></p>
-                  <button type="button" style={styles.counterTapBtn} disabled={submitting || loading || !canApplyRecovery} onClick={()=>saveRecoveryPrice()}>Start recovery campaign</button>
+                  <button type="button" style={styles.counterTapBtn} disabled={submitting || loading || !canApplyRecovery} onClick={()=>saveRecoveryPrice()}>{t("Start offer","Anza ofa")}</button>
                 </div>}
                 {panel === "Recovery" && activeCampaign && <div style={styles.simBox}>
-                  <strong>Active recovery campaign</strong>
+                  <strong>{t("Active offer","Ofa inayoendelea")}</strong>
                   <p>{formatMoney(activeCampaign.original_price)} → {formatMoney(activeCampaign.price)}</p>
                   <p>Ends: {new Date(activeCampaign.effective_ends_at || activeCampaign.ends_at).toLocaleString("en-TZ", {timeZone:"Africa/Dar_es_Salaam"})} EAT</p>
                   <div className="sr-recovery-performance">
@@ -861,7 +755,7 @@ export default function App() {
                     {activeCampaign.campaign_daily_sales != null && activeCampaign.required_daily_sales > 0 && <progress aria-label="Clearance pace versus target" max={100} value={Math.min(100,100*activeCampaign.campaign_daily_sales/activeCampaign.required_daily_sales)}/>}
                     <small>Target uses remaining stock and time. Campaign pace needs 24 hours of observations; this is not a demand forecast.</small>
                   </div>
-                  <button style={styles.secondaryBtn} disabled={submitting || loading} onClick={()=>saveRecoveryPrice(true)}>End campaign</button>
+                  <button style={styles.secondaryBtn} disabled={submitting || loading} onClick={()=>saveRecoveryPrice(true)}>{t("End offer","Maliza ofa")}</button>
                 </div>}
                 {panel === "Recovery" && <div style={styles.simBox}><strong>Campaign history & actual recovery</strong>
                   {!(selectedItem.recovery_campaigns || []).length && <p>No campaigns yet.</p>}
@@ -925,7 +819,7 @@ export default function App() {
                       fontSize: "13px",
                     }}
                   >
-                    <strong>Restock Paused ({selectedItem.status})</strong>
+                    <strong>Restock Paused ({labels[selectedItem.status]})</strong>
                     <div style={{ marginTop: "4px" }}>
                       Adding stock is locked until sales speed recovers or expired stock is cleared.
                     </div>
@@ -1067,7 +961,7 @@ const styles = {
     gap: "14px",
     marginBottom: "18px",
   },
-  title: { margin: 0, fontSize: "32px", fontWeight: 800, color: "#047857" },
+  title: { margin: 0, fontSize: "32px", fontWeight: 800, color: "#2900BB" },
   subtitle: { margin: "4px 0 0", color: "#475569", fontSize: "14px" },
   todayBar: {
     background: "#0f172a",
@@ -1138,7 +1032,7 @@ const styles = {
     background: "#ffffff",
   },
   primaryBtn: {
-    background: "#0f172a",
+    background: "#005BC4",
     color: "#ffffff",
     border: "none",
     padding: "10px 16px",
@@ -1149,7 +1043,7 @@ const styles = {
   counterTapBtn: {
     width: "100%",
     marginTop: "12px",
-    background: "#16a34a",
+    background: "#005BC4",
     color: "#ffffff",
     border: "none",
     padding: "15px 18px",
