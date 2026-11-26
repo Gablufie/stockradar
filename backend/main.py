@@ -1,5 +1,6 @@
 from forecast import forecast
 import os
+import json
 import logging
 from collections import deque
 from threading import Lock
@@ -27,7 +28,12 @@ app.add_middleware(
 
 cred_path = os.path.join(os.path.dirname(__file__), "serviceAccountKey.json")
 if not firebase_admin._apps:
-    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+    service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+
+    if service_account_json:
+        cred = credentials.Certificate(json.loads(service_account_json))
+        firebase_admin.initialize_app(cred)
+    elif os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         firebase_admin.initialize_app()
     elif os.path.exists(cred_path):
         cred = credentials.Certificate(cred_path)
