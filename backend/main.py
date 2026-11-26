@@ -1,4 +1,7 @@
+from forecast import forecast
 import os
+from decimal import Decimal, ROUND_CEILING
+from math import isfinite
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -34,6 +37,7 @@ class SaleEvent(BaseModel):
     unit_selling_price: float | None = None
     unit_cost_at_sale: float | None = None
     batch_id: str | None = None
+    recovery_id: str | None = None
 
 
 class ItemInput(BaseModel):
@@ -49,6 +53,7 @@ class ItemInput(BaseModel):
     last_sale_at: str | None = None
     units_sold_tracked: float = 0.0
     sales_events: list[SaleEvent] = []
+    recovery_campaigns: list[dict] = []
 
 
 class ItemEditInput(BaseModel):
@@ -65,6 +70,7 @@ class SaleRecordInput(BaseModel):
 class CheckoutLineItem(BaseModel):
     item_id: str
     units_sold: int
+    expected_price: float | None = None
 
 
 class CheckoutCartInput(BaseModel):
@@ -127,6 +133,118 @@ def compute_rolling_paces(events: list[SaleEvent], now: datetime):
     return recent_pace, prior_pace
 
 
+def sellable_until(expiry):
+    if not expiry:
+        return None
+    try:
+        day = date.fromisoformat(expiry.strip()[:10]) + timedelta(days=1)
+        return datetime.combine(day, datetime.min.time(), tzinfo=ZoneInfo("Africa/Dar_es_Salaam"))
+    except ValueError:
+        return None
+
+
+def campaign_deadline(c, expiry):
+    end = parse_iso_dt(c["ends_at"])
+    limit = sellable_until(expiry)
+    return min(end, limit) if limit else end
+
+
+def active_recovery(raw, now):
+    for c in reversed(raw.get("recovery_campaigns", [])):
+        if not c.get("ended_at") and campaign_deadline(c, raw.get("expiry_date")) > now:
+            return c
+    return None
+
+
+def recovery_price(raw, now):
+    c = active_recovery(raw, now)
+    base = raw.get("selling_price") or raw.get("unit_cost", 0)
+    return c["price"] if c else base
+
+
+def campaign_report(c, events, now, item):
+    sales = [e for e in events if e.recovery_id == c["id"]]
+    end = campaign_deadline(c, item.expiry_date) if not c.get("ended_at") and parse_iso_dt(c["ends_at"]) > now else parse_iso_dt(c["ends_at"])
+    active = not c.get("ended_at") and end > now
+    units = sum(e.units_sold for e in sales)
+    started = parse_iso_dt(c["started_at"])
+    elapsed = max(0, (now-started).total_seconds()/86400)
+    remaining = max(0, (end-now).total_seconds()/86400)
+    pace = units/elapsed if elapsed >= 1 else None
+    target = item.stock_qty/remaining if active and remaining > 0 else None
+    status = "Ended"
+    advice = "Campaign ended; review recorded recovery."
+    if active:
+        if item.stock_qty == 0:
+            status, advice = "Cleared", "Stock cleared; end the campaign and review replenishment."
+        elif pace is None:
+            status, advice = "Collecting data", "Review after 24 hours; improve shelf visibility now."
+        elif pace >= target:
+            status, advice = "On track", "Maintain the current strategy and monitor sales."
+        else:
+            status, advice = "Behind target", "Improve visibility or test bundles; review pricing before starting another campaign."
+    return {**c, "effective_ends_at": end.isoformat(), "active": active,
+            "performance": status, "advice": advice,
+            "campaign_daily_sales": round(pace, 2) if pace is not None and active else None,
+            "required_daily_sales": round(target, 2) if target is not None else None,
+            "remaining_capital": round(item.stock_qty*item.unit_cost, 2) if active else None,
+            "units": sum(e.units_sold for e in sales),
+            "revenue": round(sum(e.units_sold * e.unit_selling_price for e in sales), 2),
+            "capital_recovered": round(sum(e.units_sold * e.unit_cost_at_sale for e in sales), 2),
+            "gross_profit": round(sum(e.units_sold * (e.unit_selling_price-e.unit_cost_at_sale) for e in sales), 2)}
+
+
+class RecoveryInput(BaseModel):
+    discount: int
+    days: int = 7
+
+
+@firestore.transactional
+def change_recovery(tx, item_id, payload):
+    ref = db.collection("items").document(item_id)
+    doc = ref.get(transaction=tx)
+    if not doc.exists:
+        raise HTTPException(404, "Item not found")
+    raw = doc.to_dict()
+    now = datetime.now(timezone.utc)
+    campaigns = raw.get("recovery_campaigns", [])
+    active = active_recovery(raw, now)
+    if payload is None:
+        if not active:
+            raise HTTPException(409, "No active campaign")
+        active["ended_at"] = now.isoformat()
+    else:
+        if active:
+            raise HTTPException(409, "End the active campaign first")
+        expiry = parse_expiry_days(raw.get("expiry_date"), now.astimezone(ZoneInfo("Africa/Dar_es_Salaam")).date())
+        if raw.get("stock_qty", 0) <= 0 or (expiry is not None and expiry < 0):
+            raise HTTPException(400, "No sellable stock")
+        base = raw.get("selling_price") or raw.get("unit_cost", 0)
+        cost = raw.get("unit_cost", 0)
+        if not all(isfinite(x) for x in (base, cost)) or cost < 0 or not 1 <= payload.discount <= 99 or not 1 <= payload.days <= 30:
+            raise HTTPException(400, "Invalid recovery parameters")
+        price = float((Decimal(str(base)) * (100-payload.discount)/100).quantize(Decimal("0.01"), rounding=ROUND_CEILING))
+        if not 0 < price < base or price < cost:
+            raise HTTPException(400, "Discount would violate the cost floor")
+        deadline = now + timedelta(days=payload.days)
+        limit = sellable_until(raw.get("expiry_date"))
+        if limit:
+            deadline = min(deadline, limit)
+        campaigns.append({"id": str(uuid.uuid4()), "original_price": base, "price": price, "discount": payload.discount, "started_at": now.isoformat(), "ends_at": deadline.isoformat(), "ended_at": None})
+    tx.update(ref, {"recovery_campaigns": campaigns})
+    return {"item": analyze_item(ItemInput(**{**raw, "recovery_campaigns": campaigns}), item_id)}
+
+
+@app.post("/api/items/{item_id}/recovery")
+def start_recovery(item_id: str, payload: RecoveryInput):
+    return change_recovery(db.transaction(), item_id, payload)
+
+
+@app.post("/api/items/{item_id}/recovery/end")
+def end_recovery(item_id: str):
+    return change_recovery(db.transaction(), item_id, None)
+
+
 def analyze_item(item: ItemInput, doc_id: str | None = None):
     now = datetime.now(timezone.utc)
     today_utc = now.astimezone(ZoneInfo("Africa/Dar_es_Salaam")).date()
@@ -134,6 +252,8 @@ def analyze_item(item: ItemInput, doc_id: str | None = None):
     effective_selling_price = (
         item.selling_price if item.selling_price and item.selling_price > 0 else item.unit_cost
     )
+    base_price = effective_selling_price
+    effective_selling_price = recovery_price(item.model_dump(), now)
     unit_profit = round(effective_selling_price - item.unit_cost, 2)
 
     if effective_selling_price > item.unit_cost:
@@ -242,6 +362,9 @@ def analyze_item(item: ItemInput, doc_id: str | None = None):
             cash_collected_today += qty * sp
             profit_today += qty * (sp - uc)
 
+    current_campaign = active_recovery(item.model_dump(), now)
+    if current_campaign and not is_expired:
+        action = campaign_report(current_campaign, item.sales_events, now, item)["advice"]
     return {
         "id": doc_id,
         "sku": item.sku,
@@ -249,6 +372,8 @@ def analyze_item(item: ItemInput, doc_id: str | None = None):
         "stock_qty": item.stock_qty,
         "unit_cost": item.unit_cost,
         "selling_price": effective_selling_price,
+        "base_price": base_price,
+        "recovery_campaigns": [campaign_report(c, item.sales_events, now, item) for c in reversed(item.recovery_campaigns)],
         "unit_profit": unit_profit,
         "max_safe_discount_pct": max_safe_discount_pct,
         "expiry_date": item.expiry_date or "",
@@ -296,7 +421,8 @@ def prepare_sale(doc, item_id, units_sold, now, batch_id=None):
     now_iso = now.isoformat()
     unit_cost = float(raw.get("unit_cost", 0.0))
     raw_sp = float(raw.get("selling_price", 0.0))
-    effective_sp = raw_sp if raw_sp > 0 else unit_cost
+    effective_sp = recovery_price(raw, now)
+    campaign = active_recovery(raw, now)
 
     existing_events = [SaleEvent(**e) for e in (raw.get("sales_events") or [])]
     existing_events.append(
@@ -306,6 +432,7 @@ def prepare_sale(doc, item_id, units_sold, now, batch_id=None):
             unit_selling_price=effective_sp,
             unit_cost_at_sale=unit_cost,
             batch_id=batch_id,
+            recovery_id=campaign["id"] if campaign else None,
         )
     )
 
@@ -322,15 +449,17 @@ def prepare_sale(doc, item_id, units_sold, now, batch_id=None):
         "sales_events": [e.model_dump() for e in existing_events],
     }
     merged = {**raw, **update_data}
-    return update_data, analyze_item(ItemInput(**merged), doc_id=item_id)
+    return update_data, {**analyze_item(ItemInput(**merged), doc_id=item_id), "sale_unit_price": effective_sp}
 
 
 @firestore.transactional
-def commit_sales(transaction, quantities, now, batch_id=None):
+def commit_sales(transaction, quantities, now, batch_id=None, expected=None):
     prepared = []
     for item_id, qty in quantities.items():
         ref = db.collection("items").document(item_id)
         update, analyzed = prepare_sale(ref.get(transaction=transaction), item_id, qty, now, batch_id)
+        if expected and item_id in expected and expected[item_id] != analyzed["sale_unit_price"]:
+            raise HTTPException(409, "Price changed; refresh basket before checkout")
         prepared.append((ref, update, analyzed))
     for ref, update, _ in prepared:
         transaction.update(ref, update)
@@ -351,6 +480,7 @@ def create_item(item: ItemInput):
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
         payload = item.model_dump()
+        payload["recovery_campaigns"] = []
         if not payload.get("selling_price") or payload["selling_price"] <= 0:
             payload["selling_price"] = payload["unit_cost"]
         payload["expiry_date"] = (payload.get("expiry_date") or "").strip() or None
@@ -370,13 +500,20 @@ def create_item(item: ItemInput):
 
 @app.patch("/api/items/{item_id}")
 def edit_item(item_id: str, payload: ItemEditInput):
+    return edit_item_tx(db.transaction(), item_id, payload)
+
+
+@firestore.transactional
+def edit_item_tx(tx, item_id, payload):
     try:
         doc_ref = db.collection("items").document(item_id)
-        doc = doc_ref.get()
+        doc = doc_ref.get(transaction=tx)
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Item not found")
 
         raw = doc.to_dict()
+        if active_recovery(raw, datetime.now(timezone.utc)):
+            raise HTTPException(409, "End the recovery campaign before editing this item")
         updates = {}
         if payload.name is not None and payload.name.strip():
             updates["name"] = payload.name.strip()
@@ -388,7 +525,7 @@ def edit_item(item_id: str, payload: ItemEditInput):
             updates["expiry_date"] = payload.expiry_date.strip() or None
 
         if updates:
-            doc_ref.update(updates)
+            tx.update(doc_ref, updates)
 
         merged = {**raw, **updates}
         return {"message": "Item updated", "item": analyze_item(ItemInput(**merged), doc_id=item_id)}
@@ -440,9 +577,9 @@ def checkout_customer_cart(payload: CheckoutCartInput):
             if line.units_sold < 1:
                 raise HTTPException(status_code=400, detail="Quantity must be at least 1")
             quantities[line.item_id] = quantities.get(line.item_id, 0) + line.units_sold
-        updated_items = commit_sales(db.transaction(), quantities, now, batch_id)
+        updated_items = commit_sales(db.transaction(), quantities, now, batch_id, {line.item_id: line.expected_price for line in payload.items if line.expected_price is not None})
         total_units = sum(quantities.values())
-        total_paid = sum(quantities[item["id"]] * item["selling_price"] for item in updated_items)
+        total_paid = sum(quantities[item["id"]] * item["sale_unit_price"] for item in updated_items)
 
         return {
             "message": f"Completed sale of {total_units} items",
@@ -634,3 +771,27 @@ def list_actions():
         return [{"id": d.id, **d.to_dict()} for d in docs]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/predictions")
+def get_predictions(demo: bool = False):
+    now = datetime.now(timezone.utc)
+    tz = ZoneInfo("Africa/Dar_es_Salaam")
+    today = now.astimezone(tz).date()
+    rows = []
+    for doc in db.collection("demo_items" if demo else "items").stream():
+        item = ItemInput(**doc.to_dict())
+        valid = [(parse_iso_dt(e.timestamp), e.units_sold) for e in item.sales_events]
+        valid = [(dt, qty) for dt, qty in valid if dt and dt <= now and qty > 0]
+        created = parse_iso_dt(item.created_at)
+        start = created.astimezone(tz).date() + timedelta(days=1) if created else today
+        start = max(start, today - timedelta(days=30))
+        dates = [start + timedelta(days=i) for i in range(max(0, (today-start).days))]
+        counts = {d: 0 for d in dates}
+        for dt, qty in valid:
+            day = dt.astimezone(tz).date()
+            if day in counts:
+                counts[day] += qty
+        price = recovery_price(item.model_dump(), now)
+        result = forecast(list(counts.values()), item.stock_qty, item.unit_cost, price, parse_expiry_days(item.expiry_date, today))
+        rows.append({"id": doc.id, "name": item.name, "stock": item.stock_qty, "history": [{"date": d.isoformat(), "units": counts[d]} for d in dates], **result})
+    return {"as_of": today.isoformat(), "demo": demo, "items": rows}
