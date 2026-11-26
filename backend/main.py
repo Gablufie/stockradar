@@ -5,11 +5,12 @@ from math import isfinite
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, auth
 
 app = FastAPI(title="StockRadar API")
 
@@ -29,6 +30,25 @@ if not firebase_admin._apps:
         firebase_admin.initialize_app()
 
 db = firestore.client()
+bearer = HTTPBearer(auto_error=False)
+
+def owner_uid(token: HTTPAuthorizationCredentials = Depends(bearer)):
+    if token is None:
+        raise HTTPException(401, "Authentication required")
+    try:
+        claims = auth.verify_id_token(token.credentials, check_revoked=True)
+    except Exception:
+        raise HTTPException(401, "Authentication required")
+    return claims["uid"]
+
+def shop_collection(uid, name):
+    return db.collection("shops").document(uid).collection(name)
+
+def item_ref(uid, item_id):
+    if not item_id or "/" in item_id or item_id in (".", ".."):
+        raise HTTPException(400, "Invalid item ID")
+    return shop_collection(uid, "items").document(item_id)
+
 
 
 class SaleEvent(BaseModel):
@@ -200,8 +220,8 @@ class RecoveryInput(BaseModel):
 
 
 @firestore.transactional
-def change_recovery(tx, item_id, payload):
-    ref = db.collection("items").document(item_id)
+def change_recovery(tx, uid, item_id, payload):
+    ref = item_ref(uid, item_id)
     doc = ref.get(transaction=tx)
     if not doc.exists:
         raise HTTPException(404, "Item not found")
@@ -236,13 +256,13 @@ def change_recovery(tx, item_id, payload):
 
 
 @app.post("/api/items/{item_id}/recovery")
-def start_recovery(item_id: str, payload: RecoveryInput):
-    return change_recovery(db.transaction(), item_id, payload)
+def start_recovery(item_id: str, payload: RecoveryInput, uid: str = Depends(owner_uid)):
+    return change_recovery(db.transaction(), uid, item_id, payload)
 
 
 @app.post("/api/items/{item_id}/recovery/end")
-def end_recovery(item_id: str):
-    return change_recovery(db.transaction(), item_id, None)
+def end_recovery(item_id: str, uid: str = Depends(owner_uid)):
+    return change_recovery(db.transaction(), uid, item_id, None)
 
 
 def analyze_item(item: ItemInput, doc_id: str | None = None):
@@ -453,10 +473,10 @@ def prepare_sale(doc, item_id, units_sold, now, batch_id=None):
 
 
 @firestore.transactional
-def commit_sales(transaction, quantities, now, batch_id=None, expected=None):
+def commit_sales(transaction, uid, quantities, now, batch_id=None, expected=None):
     prepared = []
     for item_id, qty in quantities.items():
-        ref = db.collection("items").document(item_id)
+        ref = item_ref(uid, item_id)
         update, analyzed = prepare_sale(ref.get(transaction=transaction), item_id, qty, now, batch_id)
         if expected and item_id in expected and expected[item_id] != analyzed["sale_unit_price"]:
             raise HTTPException(409, "Price changed; refresh basket before checkout")
@@ -466,8 +486,8 @@ def commit_sales(transaction, quantities, now, batch_id=None, expected=None):
     return [analyzed for _, _, analyzed in prepared]
 
 
-def apply_single_item_sale(item_id, units_sold, now, batch_id=None):
-    return commit_sales(db.transaction(), {item_id: units_sold}, now, batch_id)[0]
+def apply_single_item_sale(uid, item_id, units_sold, now, batch_id=None):
+    return commit_sales(db.transaction(), uid, {item_id: units_sold}, now, batch_id)[0]
 
 
 @app.get("/")
@@ -476,7 +496,7 @@ def health_check():
 
 
 @app.post("/api/items")
-def create_item(item: ItemInput):
+def create_item(item: ItemInput, uid: str = Depends(owner_uid)):
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
         payload = item.model_dump()
@@ -490,23 +510,23 @@ def create_item(item: ItemInput):
         payload["recent_daily_sales"] = payload.get("recent_daily_sales") or 0.0
         payload["sales_events"] = payload.get("sales_events") or []
 
-        doc_ref = db.collection("items").document()
+        doc_ref = shop_collection(uid, "items").document()
         doc_ref.set(payload)
         saved = ItemInput(**payload)
         return {"message": "Item saved", "item": analyze_item(saved, doc_id=doc_ref.id)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.patch("/api/items/{item_id}")
-def edit_item(item_id: str, payload: ItemEditInput):
-    return edit_item_tx(db.transaction(), item_id, payload)
+def edit_item(item_id: str, payload: ItemEditInput, uid: str = Depends(owner_uid)):
+    return edit_item_tx(db.transaction(), uid, item_id, payload)
 
 
 @firestore.transactional
-def edit_item_tx(tx, item_id, payload):
+def edit_item_tx(tx, uid, item_id, payload):
     try:
-        doc_ref = db.collection("items").document(item_id)
+        doc_ref = item_ref(uid, item_id)
         doc = doc_ref.get(transaction=tx)
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Item not found")
@@ -532,13 +552,13 @@ def edit_item_tx(tx, item_id, payload):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.delete("/api/items/{item_id}")
-def delete_item(item_id: str):
+def delete_item(item_id: str, uid: str = Depends(owner_uid)):
     try:
-        doc_ref = db.collection("items").document(item_id)
+        doc_ref = item_ref(uid, item_id)
         doc = doc_ref.get()
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Item not found")
@@ -547,25 +567,25 @@ def delete_item(item_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.patch("/api/items/{item_id}/sales")
-def record_item_sale(item_id: str, payload: SaleRecordInput):
+def record_item_sale(item_id: str, payload: SaleRecordInput, uid: str = Depends(owner_uid)):
     try:
         if payload.units_sold < 1:
             raise HTTPException(status_code=400, detail="units_sold must be at least 1")
         now = datetime.now(timezone.utc)
-        updated_item = apply_single_item_sale(item_id, int(payload.units_sold), now, batch_id=None)
+        updated_item = apply_single_item_sale(uid, item_id, int(payload.units_sold), now, batch_id=None)
         return {"message": f"Recorded {payload.units_sold} sold", "item": updated_item}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.post("/api/sales/checkout")
-def checkout_customer_cart(payload: CheckoutCartInput):
+def checkout_customer_cart(payload: CheckoutCartInput, uid: str = Depends(owner_uid)):
     try:
         if not payload.items:
             raise HTTPException(status_code=400, detail="Customer basket is empty")
@@ -577,7 +597,7 @@ def checkout_customer_cart(payload: CheckoutCartInput):
             if line.units_sold < 1:
                 raise HTTPException(status_code=400, detail="Quantity must be at least 1")
             quantities[line.item_id] = quantities.get(line.item_id, 0) + line.units_sold
-        updated_items = commit_sales(db.transaction(), quantities, now, batch_id, {line.item_id: line.expected_price for line in payload.items if line.expected_price is not None})
+        updated_items = commit_sales(db.transaction(), uid, quantities, now, batch_id, {line.item_id: line.expected_price for line in payload.items if line.expected_price is not None})
         total_units = sum(quantities.values())
         total_paid = sum(quantities[item["id"]] * item["sale_unit_price"] for item in updated_items)
 
@@ -591,14 +611,14 @@ def checkout_customer_cart(payload: CheckoutCartInput):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.post("/api/sales/undo-basket/{batch_id}")
-def undo_basket_sale(batch_id: str):
+def undo_basket_sale(batch_id: str, uid: str = Depends(owner_uid)):
     try:
         now = datetime.now(timezone.utc)
-        docs = db.collection("items").stream()
+        docs = shop_collection(uid, "items").stream()
         undone_count = 0
 
         for doc in docs:
@@ -634,13 +654,13 @@ def undo_basket_sale(batch_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.post("/api/items/{item_id}/undo-sale")
-def undo_last_sale(item_id: str):
+def undo_last_sale(item_id: str, uid: str = Depends(owner_uid)):
     try:
-        doc_ref = db.collection("items").document(item_id)
+        doc_ref = item_ref(uid, item_id)
         doc = doc_ref.get()
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Item not found")
@@ -675,16 +695,16 @@ def undo_last_sale(item_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.patch("/api/items/{item_id}/restock")
-def restock_item(item_id: str, payload: RestockInput):
+def restock_item(item_id: str, payload: RestockInput, uid: str = Depends(owner_uid)):
     try:
         if payload.units_added < 1:
             raise HTTPException(status_code=400, detail="units_added must be at least 1")
 
-        doc_ref = db.collection("items").document(item_id)
+        doc_ref = item_ref(uid, item_id)
         doc = doc_ref.get()
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Item not found")
@@ -709,13 +729,13 @@ def restock_item(item_id: str, payload: RestockInput):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.get("/api/radar")
-def get_radar_overview():
+def get_radar_overview(uid: str = Depends(owner_uid)):
     try:
-        docs = db.collection("items").stream()
+        docs = shop_collection(uid, "items").stream()
         results = []
         for doc in docs:
             data = doc.to_dict()
@@ -744,41 +764,41 @@ def get_radar_overview():
         }
         return {"summary": summary, "items": results}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.post("/api/actions")
-def log_action(entry: ActionLogInput):
+def log_action(entry: ActionLogInput, uid: str = Depends(owner_uid)):
     try:
         record = entry.model_dump()
         record["created_at"] = datetime.now(timezone.utc).isoformat()
-        doc_ref = db.collection("action_logs").document()
+        doc_ref = shop_collection(uid, "action_logs").document()
         doc_ref.set(record)
         return {"id": doc_ref.id, **record}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.get("/api/actions")
-def list_actions():
+def list_actions(uid: str = Depends(owner_uid)):
     try:
         docs = (
-            db.collection("action_logs")
+            shop_collection(uid, "action_logs")
             .order_by("created_at", direction=firestore.Query.DESCENDING)
             .limit(15)
             .stream()
         )
         return [{"id": d.id, **d.to_dict()} for d in docs]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Server error")
 
 @app.get("/api/predictions")
-def get_predictions(demo: bool = False):
+def get_predictions(demo: bool = False, uid: str = Depends(owner_uid)):
     now = datetime.now(timezone.utc)
     tz = ZoneInfo("Africa/Dar_es_Salaam")
     today = now.astimezone(tz).date()
     rows = []
-    for doc in db.collection("demo_items" if demo else "items").stream():
+    for doc in (db.collection("demo_items") if demo else shop_collection(uid, "items")).stream():
         item = ItemInput(**doc.to_dict())
         valid = [(parse_iso_dt(e.timestamp), e.units_sold) for e in item.sales_events]
         valid = [(dt, qty) for dt, qty in valid if dt and dt <= now and qty > 0]

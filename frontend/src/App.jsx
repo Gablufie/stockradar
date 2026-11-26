@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./stockradar.css";
 import Predictions from "./Predictions";
+import { AuthGate } from "./AuthGate";
 import { translator, errorMessage } from "./translations";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
@@ -13,7 +14,9 @@ const INITIAL_FORM = {
   expiry_date: "",
 };
 
-export default function App() {
+export default function App() { return <AuthGate>{session => <ShopApp key={session.uid} {...session}/>}</AuthGate>; }
+
+function ShopApp({ request, logout, shopName }) {
   const [lang, setLang] = useState(() => localStorage.getItem("sr-language") === "sw" ? "sw" : "en");
   useEffect(() => { localStorage.setItem("sr-language", lang); }, [lang]);
   const t = translator(lang);
@@ -25,7 +28,7 @@ export default function App() {
   const [quickCheckout, setQuickCheckout] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [page, setPage] = useState("Overview");
-  useEffect(() => { document.title = `StockRadar | ${t("My Stock")}`; document.documentElement.lang = lang; }, [lang]);
+  useEffect(() => { document.title = `StockRadar | ${labels[page]}`; document.documentElement.lang = lang; }, [lang, page]);
   const [summary, setSummary] = useState(null);
   const [items, setItems] = useState([]);
   const [filter, setFilter] = useState("All");
@@ -70,7 +73,7 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      const radarRes = await fetch(`${API_BASE}/api/radar`);
+      const radarRes = await request(`${API_BASE}/api/radar`);
       if (!radarRes.ok) throw new Error(`Radar API returned ${radarRes.status}`);
       const radarData = await radarRes.json();
       const freshItems = radarData.items || [];
@@ -175,7 +178,7 @@ export default function App() {
     setSubmitting(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/sales/checkout`, {
+      const res = await request(`${API_BASE}/api/sales/checkout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -214,7 +217,7 @@ export default function App() {
     setSubmitting(true);
     setError("");
     try {
-      const res = await fetch(
+      const res = await request(
         `${API_BASE}/api/sales/undo-basket/${lastBasketBatch.batchId}`,
         { method: "POST" }
       );
@@ -251,7 +254,7 @@ export default function App() {
         selling_price: Number(form.selling_price || form.unit_cost),
         expiry_date: form.expiry_date || null,
       };
-      const res = await fetch(`${API_BASE}/api/items`, {
+      const res = await request(`${API_BASE}/api/items`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -276,7 +279,7 @@ export default function App() {
     setSubmitting(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/items/${selectedItem.id}/sales`, {
+      const res = await request(`${API_BASE}/api/items/${selectedItem.id}/sales`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ units_sold: 1 }),
@@ -304,7 +307,7 @@ export default function App() {
     setSubmitting(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/items/${selectedItem.id}/undo-sale`, {
+      const res = await request(`${API_BASE}/api/items/${selectedItem.id}/undo-sale`, {
         method: "POST",
       });
       if (!res.ok) {
@@ -329,7 +332,7 @@ export default function App() {
     setSubmitting(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/items/${selectedItem.id}/restock`, {
+      const res = await request(`${API_BASE}/api/items/${selectedItem.id}/restock`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ units_added: added }),
@@ -356,7 +359,7 @@ export default function App() {
     setSubmitting(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/items/${selectedItem.id}`, {
+      const res = await request(`${API_BASE}/api/items/${selectedItem.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -392,7 +395,7 @@ export default function App() {
     if (!window.confirm(restore ? t("End this campaign and restore the base price?") : t(`Start a recovery campaign for up to ${recoveryDays} days (limited by expiry)?`,`Anza ofa ya hadi siku ${recoveryDays}, bila kuvuka tarehe ya mwisho wa matumizi?`))) return;
     setSubmitting(true); setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/items/${selectedItem.id}/recovery${restore ? "/end" : ""}`, {
+      const res = await request(`${API_BASE}/api/items/${selectedItem.id}/recovery${restore ? "/end" : ""}`, {
         method: "POST", headers: {"Content-Type":"application/json"},
         body: restore ? undefined : JSON.stringify({discount, days: Number(recoveryDays)})
       });
@@ -409,7 +412,7 @@ export default function App() {
     setSubmitting(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/items/${selectedItem.id}`, {
+      const res = await request(`${API_BASE}/api/items/${selectedItem.id}`, {
         method: "DELETE",
       });
       if (!res.ok) {
@@ -481,8 +484,8 @@ export default function App() {
         <div className="sr-sidebar-foot">StockRadar v1.0<br/><small>{t("Independent portfolio project")}</small></div>
       </aside>
       <main className="sr-main">
-      <header className="sr-header"><div><h1>{labels[page]}</h1></div><div className="sr-header-actions"><select aria-label="Language / Lugha" value={lang} onChange={e=>setLang(e.target.value)}><option value="en">English</option><option value="sw">Kiswahili</option></select><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading?t("Loading…"):t("Refresh")}</button></div></header>
-      {page === "Predictive Intelligence" && <><section className="sr-panel"><h2>{t("Shop report today")}</h2>{summary && <div className="sr-simple-kpis"><KpiCard label={t("Sales today")} value={formatMoney(summary.cash_collected_today)}/><KpiCard label={t("Gross profit today")} value={formatMoney(summary.profit_today)}/><KpiCard label={t("Units sold today")} value={summary.units_sold_today}/><KpiCard label={t("Money in stock")} value={formatMoney(capital)}/></div>}<p>{t("Gross profit excludes shop expenses.")}</p><button style={styles.secondaryBtn} onClick={()=>setAdvanced(v=>!v)}>{advanced?t("Hide detailed forecasts"):t("Show detailed forecasts")}</button></section>{advanced && <Predictions api={API_BASE} refresh={loading} money={formatMoney} lang={lang}/>}</>}
+      <header className="sr-header"><div><h1>{labels[page]}</h1><small>{shopName}</small></div><div className="sr-header-actions"><button style={styles.secondaryBtn} onClick={logout}>{t("Log out","Toka")}</button><select aria-label="Language / Lugha" value={lang} onChange={e=>setLang(e.target.value)}><option value="en">English</option><option value="sw">Kiswahili</option></select><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading?t("Loading…"):t("Refresh")}</button></div></header>
+      {page === "Predictive Intelligence" && <><section className="sr-panel"><h2>{t("Shop report today")}</h2>{summary && <div className="sr-simple-kpis"><KpiCard label={t("Sales today")} value={formatMoney(summary.cash_collected_today)}/><KpiCard label={t("Gross profit today")} value={formatMoney(summary.profit_today)}/><KpiCard label={t("Units sold today")} value={summary.units_sold_today}/><KpiCard label={t("Money in stock")} value={formatMoney(capital)}/></div>}<p>{t("Gross profit excludes shop expenses.")}</p><button style={styles.secondaryBtn} onClick={()=>setAdvanced(v=>!v)}>{advanced?t("Hide detailed forecasts"):t("Show detailed forecasts")}</button></section>{advanced && <Predictions request={request} api={API_BASE} refresh={loading} money={formatMoney} lang={lang}/>}</>}
       {toast && <div style={styles.toastBox}>{toast}</div>}
       {error && <div style={styles.errorBox}>{error}</div>}
 

@@ -1,10 +1,10 @@
 import {useEffect,useState} from 'react';
 import {translator,errorMessage} from './translations';
-export default function Predictions({api,refresh,money,lang="en"}) {
+export default function Predictions({request,api,refresh,money,lang="en"}) {
  const t=translator(lang);
  const [demo,setDemo]=useState(false);
  const [data,setData]=useState(null), [error,setError]=useState(''), [h,setH]=useState('7'), [selected,setSelected]=useState('');
- useEffect(()=>{if(refresh)return; const controller=new AbortController(); setError(''); setData(null); fetch(`${api}/api/predictions?demo=${demo}`,{signal:controller.signal}).then(r=>{if(!r.ok)throw Error(`API ${r.status}`);return r.json()}).then(setData).catch(e=>{if(e.name!=='AbortError')setError(e.message)});return ()=>controller.abort()},[api,refresh,demo]);
+ useEffect(()=>{if(refresh)return; const controller=new AbortController(); setError(''); setData(null); request(`${api}/api/predictions?demo=${demo}`,{signal:controller.signal}).then(r=>{if(!r.ok)throw Error(`API ${r.status}`);return r.json()}).then(setData).catch(e=>{if(e.name!=='AbortError')setError(e.message)});return ()=>controller.abort()},[request,api,refresh,demo]);
  const switcher=<section className="sr-panel"><div className="sr-between"><strong>{demo?t("SIMULATED DATA — not live inventory"):t("Live inventory")}</strong><select aria-label={t("Data source")} value={demo?'demo':'live'} onChange={e=>{setData(null);setSelected('');setDemo(e.target.value==='demo')}}><option value="live">{t("Live inventory")}</option><option value="demo">{t("Demo data")}</option></select></div></section>;
  if(error)return <>{switcher}<section className="sr-panel">{t("Forecast unavailable:")} {errorMessage(lang,error)}</section></>;
  if(!data||refresh)return <>{switcher}<section className="sr-panel">{t("Loading forecasts…")}</section></>;
