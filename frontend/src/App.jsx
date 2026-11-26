@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./stockradar.css";
 import Predictions from "./Predictions";
+import { translator, errorMessage } from "./translations";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 
@@ -15,13 +16,16 @@ const INITIAL_FORM = {
 export default function App() {
   const [lang, setLang] = useState(() => localStorage.getItem("sr-language") === "sw" ? "sw" : "en");
   useEffect(() => { localStorage.setItem("sr-language", lang); }, [lang]);
-  const t = (en, sw) => lang === "sw" ? sw : en;
-  const labels = {Overview:t("Home","Mwanzo"), "Inventory Workspace":t("My Stock","Bidhaa"), "Predictive Intelligence":t("Reports","Ripoti"), Details:t("Details","Maelezo"), Recovery:t("Offers","Ofa"), Basket:t("Basket","Kikapu"), All:t("All","Zote"), "Dead-Stock Risk":t("Not selling / at risk","Haziuzi vizuri"), "Slowing Down":t("Selling slowly","Zinauzika polepole"), Healthy:t("Selling normally","Zinauzika kawaida"), "Reorder Soon":t("Buy more soon","Nunua zaidi karibuni"), "Expiring Soon":t("Expiring soon","Muda unaisha karibuni")};
+  const t = translator(lang);
+  const labels = {Overview:t("Home"), "Inventory Workspace":t("My Stock"), "Predictive Intelligence":t("Reports"), Details:t("Details"), Recovery:t("Offers"), Basket:t("Basket"), All:t("All"), "Dead-Stock Risk":t("Not selling / at risk"), "Slowing Down":t("Selling slowly"), Healthy:t("Selling normally"), "Reorder Soon":t("Buy more soon"), "Expiring Soon":t("Expiring soon")};
   const [quickSale, setQuickSale] = useState(false);
+  const inspectorRef = useRef(null);
+  const [inspectorRequest, setInspectorRequest] = useState(0);
+  const handledInspectorRequest = useRef(0);
   const [quickCheckout, setQuickCheckout] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [page, setPage] = useState("Overview");
-  useEffect(() => { document.title = "StockRadar | Inventory Intelligence"; }, []);
+  useEffect(() => { document.title = `StockRadar | ${t("My Stock")}`; document.documentElement.lang = lang; }, [lang]);
   const [summary, setSummary] = useState(null);
   const [items, setItems] = useState([]);
   const [filter, setFilter] = useState("All");
@@ -87,7 +91,7 @@ export default function App() {
       });
     } catch (err) {
       setError(
-        `Offline or server unreachable (${err.message}). Check that Uvicorn is running on port 8000.`
+        t("Cannot connect to the server. Try again.")
       );
     } finally {
       setLoading(false);
@@ -98,8 +102,21 @@ export default function App() {
     fetchRadar();
   }, []);
 
+  useEffect(() => {
+    if (inspectorRequest === handledInspectorRequest.current || page !== "Inventory Workspace" || quickSale) return;
+    const frame = requestAnimationFrame(() => {
+      const target = inspectorRef.current;
+      if (!target) return;
+      handledInspectorRequest.current = inspectorRequest;
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduced ? "instant" : "smooth", block: "start", inline: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [inspectorRequest, page, quickSale]);
+
   const openInspector = (item) => {
     if (submitting) return;
+    setInspectorRequest(n => n + 1);
     setSelectedItem(item);
     setPanel(prev => prev === "Recovery" ? "Recovery" : "Details");
     setDiscount(0);
@@ -186,7 +203,7 @@ export default function App() {
       );
       await fetchRadar();
     } catch (err) {
-      setError(`Could not complete customer sale: ${err.message}`);
+      setError(t("Could not complete customer sale") + ": " + errorMessage(lang, err.message));
     } finally {
       setSubmitting(false);
     }
@@ -206,12 +223,12 @@ export default function App() {
         throw new Error(errData.detail || `Error ${res.status}`);
       }
       showNotice(
-        `Undid basket sale (${lastBasketBatch.totalUnits} items · ${formatMoney(lastBasketBatch.totalPaid)})`
+        t(`Undid basket sale (${lastBasketBatch.totalUnits} items · ${formatMoney(lastBasketBatch.totalPaid)})`,`Mauzo yametenguliwa (bidhaa ${lastBasketBatch.totalUnits} · ${formatMoney(lastBasketBatch.totalPaid)})`)
       );
       setLastBasketBatch(null);
       await fetchRadar();
     } catch (err) {
-      setError(`Failed to undo basket sale: ${err.message}`);
+      setError(t("Failed to undo basket sale") + ": " + errorMessage(lang, err.message));
     } finally {
       setSubmitting(false);
     }
@@ -245,10 +262,10 @@ export default function App() {
       }
       setForm(INITIAL_FORM);
       setShowAdd(false);
-      showNotice(`Added "${payload.name}"`);
+      showNotice(t(`Added "${payload.name}"`,`Bidhaa "${payload.name}" imeongezwa`));
       await fetchRadar();
     } catch (err) {
-      setError(`Failed to save item: ${err.message}`);
+      setError(t("Failed to save item") + ": " + errorMessage(lang, err.message));
     } finally {
       setSubmitting(false);
     }
@@ -272,11 +289,11 @@ export default function App() {
       setSelectedItem(data.item);
       const unitCharge = Number(data.item.selling_price || data.item.unit_cost);
       showNotice(
-        `Sold 1 × ${data.item.name} (${formatMoney(unitCharge)}) · ${data.item.stock_qty} left`
+        t(`Sold 1 × ${data.item.name} (${formatMoney(unitCharge)}) · ${data.item.stock_qty} left`,`Imeuzwa 1 × ${data.item.name} (${formatMoney(unitCharge)}) · zimebaki ${data.item.stock_qty}`)
       );
       await fetchRadar();
     } catch (err) {
-      setError(`Sale did not save: ${err.message}`);
+      setError(t("Sale did not save") + ": " + errorMessage(lang, err.message));
     } finally {
       setSubmitting(false);
     }
@@ -296,10 +313,10 @@ export default function App() {
       }
       const data = await res.json();
       setSelectedItem(data.item);
-      showNotice(`Undid last sale on ${data.item.name}`);
+      showNotice(t(`Undid last sale on ${data.item.name}`,`Mauzo ya mwisho ya ${data.item.name} yametenguliwa`));
       await fetchRadar();
     } catch (err) {
-      setError(`Failed to undo last sale: ${err.message}`);
+      setError(t("Failed to undo last sale") + ": " + errorMessage(lang, err.message));
     } finally {
       setSubmitting(false);
     }
@@ -324,10 +341,10 @@ export default function App() {
       const data = await res.json();
       setSelectedItem(data.item);
       setRestockInput(10);
-      showNotice(`Added ${added} units to ${data.item.name}`);
+      showNotice(t(`Added ${added} units to ${data.item.name}`,`Bidhaa ${added} za ${data.item.name} zimeongezwa`));
       await fetchRadar();
     } catch (err) {
-      setError(`Failed to restock item: ${err.message}`);
+      setError(t("Failed to restock item") + ": " + errorMessage(lang, err.message));
     } finally {
       setSubmitting(false);
     }
@@ -356,10 +373,10 @@ export default function App() {
       const data = await res.json();
       setSelectedItem(data.item);
       setIsEditing(false);
-      showNotice("Item details updated");
+      showNotice(t("Item details updated"));
       await fetchRadar();
     } catch (err) {
-      setError(`Failed to update item: ${err.message}`);
+      setError(t("Failed to update item") + ": " + errorMessage(lang, err.message));
     } finally {
       setSubmitting(false);
     }
@@ -372,7 +389,7 @@ export default function App() {
   const activeCampaign = selectedItem?.recovery_campaigns?.find(c => c.active);
   const saveRecoveryPrice = async (restore = false) => {
     if (!selectedItem || submitting || (!restore && (!canApplyRecovery || activeCampaign))) return;
-    if (!window.confirm(restore ? "End this campaign and restore the base price?" : `Start a recovery campaign for up to ${recoveryDays} days (limited by expiry)?`)) return;
+    if (!window.confirm(restore ? t("End this campaign and restore the base price?") : t(`Start a recovery campaign for up to ${recoveryDays} days (limited by expiry)?`,`Anza ofa ya hadi siku ${recoveryDays}, bila kuvuka tarehe ya mwisho wa matumizi?`))) return;
     setSubmitting(true); setError("");
     try {
       const res = await fetch(`${API_BASE}/api/items/${selectedItem.id}/recovery${restore ? "/end" : ""}`, {
@@ -381,14 +398,14 @@ export default function App() {
       });
       if (!res.ok) { const data = await res.json(); throw new Error(data.detail || `Error ${res.status}`); }
       setDiscount(0); setIsEditing(false);
-      showNotice(restore ? "Campaign ended" : "Campaign started");
+      showNotice(restore ? t("Campaign ended") : t("Campaign started"));
       await fetchRadar();
-    } catch(err) { setError(err.message); } finally { setSubmitting(false); }
+    } catch(err) { setError(errorMessage(lang, err.message)); } finally { setSubmitting(false); }
   };
 
   const handleDeleteItem = async () => {
     if (!selectedItem?.id) return;
-    if (!window.confirm(`Remove "${selectedItem.name}" from inventory?`)) return;
+    if (!window.confirm(t(`Remove "${selectedItem.name}" from inventory?`,`Futa "${selectedItem.name}" kwenye orodha ya bidhaa?`))) return;
     setSubmitting(true);
     setError("");
     try {
@@ -399,11 +416,11 @@ export default function App() {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Error ${res.status}`);
       }
-      showNotice(`Deleted "${selectedItem.name}"`);
+      showNotice(t(`Deleted "${selectedItem.name}"`,`Bidhaa "${selectedItem.name}" imefutwa`));
       setSelectedItem(null);
       await fetchRadar();
     } catch (err) {
-      setError(`Failed to delete item: ${err.message}`);
+      setError(t("Failed to delete item") + ": " + errorMessage(lang, err.message));
     } finally {
       setSubmitting(false);
     }
@@ -451,69 +468,69 @@ export default function App() {
   const duplicateNames = new Set(items.filter((item,index)=>items.some((other,j)=>j!==index && other.name.trim().toLowerCase()===item.name.trim().toLowerCase())).map(item=>item.name.trim().toLowerCase()));
   const productName = item => duplicateNames.has(item.name.trim().toLowerCase()) && item.sku ? `${item.name} (${item.sku})` : item.name;
   const urgent = attention.find(i=>i.is_expired) || [...attention].filter(i=>i.expiring_soon).sort((a,b)=>a.days_to_expiry-b.days_to_expiry)[0] || attention.find(i=>i.reorder_soon) || attention[0];
-  const tip = !summary ? null : urgent ? urgent.is_expired ? t(`${productName(urgent)} has expired. Remove it from sale.`,`${productName(urgent)} imeisha muda wake. Usiiuze.`) : urgent.expiring_soon ? t(`${productName(urgent)}: ${urgent.stock_qty} left. Aim to sell ${Math.ceil(urgent.stock_qty/Math.max(1,urgent.days_to_expiry+1))} per day before the expiry date passes.`,`${productName(urgent)}: zimebaki ${urgent.stock_qty}. Lenga kuuza ${Math.ceil(urgent.stock_qty/Math.max(1,urgent.days_to_expiry+1))} kila siku kabla muda wake haujaisha.`) : urgent.reorder_soon ? t(`Check ${productName(urgent)} before your next stock purchase.`,`Angalia ${productName(urgent)} kabla ya kununua bidhaa tena.`) : t(`${productName(urgent)} is selling slowly. Consider a special offer.`,`${productName(urgent)} inauzika polepole. Fikiria kuweka ofa.`) : t("Keep recording every sale so you can see how your shop is doing.","Endelea kurekodi kila mauzo ili ujue maendeleo ya duka lako.");
+  const tip = !summary ? null : urgent ? urgent.is_expired ? t(`${productName(urgent)} has expired. Remove it from sale.`,`${productName(urgent)} imeisha muda wake. Usiiuze.`) : urgent.expiring_soon ? t(`${productName(urgent)}: ${urgent.stock_qty} left. Aim to sell ${Math.ceil(urgent.stock_qty/Math.max(1,urgent.days_to_expiry+1))} per day before the expiry date passes.`,`${productName(urgent)}: zimebaki ${urgent.stock_qty}. Lenga kuuza ${Math.ceil(urgent.stock_qty/Math.max(1,urgent.days_to_expiry+1))} kila siku kabla muda wake haujaisha.`) : urgent.reorder_soon ? t(`Check ${productName(urgent)} before your next stock purchase.`,`Angalia ${productName(urgent)} kabla ya kununua bidhaa tena.`) : t(`${productName(urgent)} is selling slowly. Consider a special offer.`,`${productName(urgent)} inauzika polepole. Fikiria kuweka ofa.`) : t("Keep recording every sale so you can see how your shop is doing.");
   const capital = Number(summary?.total_tied_up_value || 0);
   const atRisk = Number(summary?.at_risk_capital || 0);
   const riskPct = capital > 0 ? Math.min(100, Math.max(0, atRisk/capital*100)) : 0;
   return (
     <div className="sr-shell">
       <aside className="sr-sidebar">
-        <div className="sr-brand"><span className="sr-logo">◎</span><div>Stock<span>Radar</span><small>INVENTORY INTELLIGENCE</small></div></div>
-        <div className="sr-nav-label">{t("MY SHOP","DUKA LANGU")}</div>
-        <nav aria-label="Main navigation">{nav.map(([name,icon]) => <button key={name} aria-current={page===name ? "page" : undefined} className={page===name ? "active" : ""} onClick={()=>navigate(name)}><span aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d={icon}/></svg></span><span className="sr-nav-text">{labels[name]}</span>{name==="Inventory Workspace" && basketTotalUnits>0 && <b>{basketTotalUnits}</b>}</button>)}</nav>
-        <div className="sr-sidebar-foot">StockRadar v1.0<br/><small>Independent portfolio project</small></div>
+        <div className="sr-brand"><span className="sr-logo">◎</span><div>Stock<span>Radar</span><small>{t("INVENTORY INTELLIGENCE")}</small></div></div>
+        <div className="sr-nav-label">{t("MY SHOP")}</div>
+        <nav aria-label={t("Main navigation")}>{nav.map(([name,icon]) => <button key={name} aria-current={page===name ? "page" : undefined} className={page===name ? "active" : ""} onClick={()=>navigate(name)}><span aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d={icon}/></svg></span><span className="sr-nav-text">{labels[name]}</span>{name==="Inventory Workspace" && basketTotalUnits>0 && <b>{basketTotalUnits}</b>}</button>)}</nav>
+        <div className="sr-sidebar-foot">StockRadar v1.0<br/><small>{t("Independent portfolio project")}</small></div>
       </aside>
       <main className="sr-main">
-      <header className="sr-header"><div><h1>{labels[page]}</h1></div><div className="sr-header-actions"><select aria-label="Language / Lugha" value={lang} onChange={e=>setLang(e.target.value)}><option value="en">English</option><option value="sw">Kiswahili</option></select><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading?t("Loading…","Inapakia…"):t("Refresh","Onyesha upya")}</button></div></header>
-      {page === "Predictive Intelligence" && <><section className="sr-panel"><h2>{t("Shop report today","Ripoti ya duka leo")}</h2>{summary && <div className="sr-simple-kpis"><KpiCard label={t("Sales today","Mauzo ya leo")} value={formatMoney(summary.cash_collected_today)}/><KpiCard label={t("Gross profit today","Faida ghafi leo")} value={formatMoney(summary.profit_today)}/><KpiCard label={t("Units sold today","Bidhaa zilizouzwa leo")} value={summary.units_sold_today}/><KpiCard label={t("Money in stock","Mtaji kwenye bidhaa")} value={formatMoney(capital)}/></div>}<p>{t("Gross profit excludes shop expenses.","Faida ghafi haijatoa gharama za uendeshaji.")}</p><button style={styles.secondaryBtn} onClick={()=>setAdvanced(v=>!v)}>{advanced?t("Hide detailed forecasts","Ficha makadirio"):t("Show detailed forecasts (English)","Onyesha makadirio (Kiingereza)")}</button></section>{advanced && <Predictions api={API_BASE} refresh={loading} money={formatMoney}/>}</>}
+      <header className="sr-header"><div><h1>{labels[page]}</h1></div><div className="sr-header-actions"><select aria-label="Language / Lugha" value={lang} onChange={e=>setLang(e.target.value)}><option value="en">English</option><option value="sw">Kiswahili</option></select><button onClick={fetchRadar} disabled={loading} style={styles.primaryBtn}>{loading?t("Loading…"):t("Refresh")}</button></div></header>
+      {page === "Predictive Intelligence" && <><section className="sr-panel"><h2>{t("Shop report today")}</h2>{summary && <div className="sr-simple-kpis"><KpiCard label={t("Sales today")} value={formatMoney(summary.cash_collected_today)}/><KpiCard label={t("Gross profit today")} value={formatMoney(summary.profit_today)}/><KpiCard label={t("Units sold today")} value={summary.units_sold_today}/><KpiCard label={t("Money in stock")} value={formatMoney(capital)}/></div>}<p>{t("Gross profit excludes shop expenses.")}</p><button style={styles.secondaryBtn} onClick={()=>setAdvanced(v=>!v)}>{advanced?t("Hide detailed forecasts"):t("Show detailed forecasts")}</button></section>{advanced && <Predictions api={API_BASE} refresh={loading} money={formatMoney} lang={lang}/>}</>}
       {toast && <div style={styles.toastBox}>{toast}</div>}
       {error && <div style={styles.errorBox}>{error}</div>}
 
       {page === "Overview" && <div className="sr-mobile-home">
-        <section className="sr-home-welcome"><h2>{t("Welcome to your shop!","Karibu dukani!")}</h2><p>{t("Here is how your shop is doing today.","Hivi ndivyo duka lako linavyoendelea leo.")}</p></section>
+        <section className="sr-home-welcome"><h2>{t("Welcome to your shop!")}</h2><p>{t("Here is how your shop is doing today.")}</p></section>
         {summary && <div className="sr-home-kpis">{[
-          ["↗",t("Sales today","Mauzo ya leo"),formatMoney(summary.cash_collected_today)],
-          ["+",t("Gross profit today","Faida ghafi leo"),formatMoney(summary.profit_today)],
-          ["✓",t("Units sold today","Idadi iliyouzwa leo"),summary.units_sold_today ?? 0],
-          ["▦",t("Products in stock","Aina za bidhaa zilizopo"),items.filter(i=>i.stock_qty>0).length]
+          ["↗",t("Sales today"),formatMoney(summary.cash_collected_today)],
+          ["+",t("Gross profit today"),formatMoney(summary.profit_today)],
+          ["✓",t("Units sold today"),summary.units_sold_today ?? 0],
+          ["▦",t("Products in stock"),items.filter(i=>i.stock_qty>0).length]
         ].map(([icon,label,value],index)=><div className={`sr-home-stat tone-${index}`} key={label}><span aria-hidden="true">{icon}</span><small>{label}</small><strong>{value}</strong></div>)}</div>}
-        <div className="sr-quick-actions sr-home-actions"><button onClick={()=>{navigate("Inventory Workspace");setQuickSale(true);setQuickCheckout(false);setPanel("Basket");setShowAdd(false)}}>{t("Record a sale","Rekodi mauzo")}</button><button onClick={()=>{navigate("Inventory Workspace");setShowAdd(true)}}>{t("Add a product","Ongeza bidhaa mpya")}</button></div>
-        {tip && <section className="sr-daily-tip" data-tone={urgent?.is_expired?"danger":urgent?.expiring_soon?"warning":"normal"}><div><h2>{t("Today's business tip","Ushauri wa biashara leo")}</h2><p>{tip}</p></div>{urgent && <button style={styles.secondaryBtn} onClick={()=>{navigate("Inventory Workspace");openInspector(urgent);setShowAdd(false);setPanel(urgent.is_expired||urgent.reorder_soon?"Details":"Recovery")}}>{t("View product","Angalia bidhaa")}</button>}</section>}
+        <div className="sr-quick-actions sr-home-actions"><button onClick={()=>{navigate("Inventory Workspace");setQuickSale(true);setQuickCheckout(false);setPanel("Basket");setShowAdd(false)}}>{t("Record a sale")}</button><button onClick={()=>{navigate("Inventory Workspace");setShowAdd(true)}}>{t("Add a product")}</button></div>
+        {tip && <section className="sr-daily-tip" data-tone={urgent?.is_expired?"danger":urgent?.expiring_soon?"warning":"normal"}><div><h2>{t("Today's business tip")}</h2><p>{tip}</p></div>{urgent && <button style={styles.secondaryBtn} onClick={()=>{navigate("Inventory Workspace");openInspector(urgent);setShowAdd(false);setPanel(urgent.is_expired||urgent.reorder_soon?"Details":"Recovery")}}>{t("View product")}</button>}</section>}
         <div className="sr-home-columns">
-          <section className="sr-panel"><h2>{t("Best sellers today","Bidhaa zilizouzwa zaidi leo")}</h2><p>{t("Ranked by units sold today.","Kwa idadi iliyouzwa leo.")}</p>
-          {!summary ? <p>{t("Sales data unavailable.","Taarifa za mauzo hazipatikani.")}</p> : bestSellers.length===0 ? <p>{t("No sales recorded today yet.","Hakuna mauzo yaliyorekodiwa leo bado.")}</p> : bestSellers.map(i=><div className="sr-home-seller" key={i.id}><div><strong>{productName(i)}</strong><span>{i.units_sold_today} {t("sold","zimeuzwa")}</span></div><progress max={bestSellers[0].units_sold_today} value={i.units_sold_today} aria-label={`${i.name}: ${i.units_sold_today}`}/></div>)}
-          {summary && <div className="sr-home-note">{summary.cash_collected_today>0?t(`For every TSh 1,000 sold today, your gross profit was about ${formatMoney(Math.round(1000*summary.profit_today/summary.cash_collected_today))}, before shop expenses.`,`Kwa kila TSh 1,000 ya mauzo leo, faida ghafi ilikuwa takriban ${formatMoney(Math.round(1000*summary.profit_today/summary.cash_collected_today))}, kabla ya gharama za duka.`):t("Record a sale to see today's profit margin.","Rekodi mauzo kuona asilimia ya faida leo.")}</div>}
+          <section className="sr-panel"><h2>{t("Best sellers today")}</h2><p>{t("Ranked by units sold today.")}</p>
+          {!summary ? <p>{t("Sales data unavailable.")}</p> : bestSellers.length===0 ? <p>{t("No sales recorded today yet.")}</p> : bestSellers.map(i=><div className="sr-home-seller" key={i.id}><div><strong>{productName(i)}</strong><span>{i.units_sold_today} {t("sold")}</span></div><progress max={bestSellers[0].units_sold_today} value={i.units_sold_today} aria-label={`${i.name}: ${i.units_sold_today}`}/></div>)}
+          {summary && <div className="sr-home-note">{summary.cash_collected_today>0?t(`For every TSh 1,000 sold today, your gross profit was about ${formatMoney(Math.round(1000*summary.profit_today/summary.cash_collected_today))}, before shop expenses.`,`Kwa kila TSh 1,000 ya mauzo leo, faida ghafi ilikuwa takriban ${formatMoney(Math.round(1000*summary.profit_today/summary.cash_collected_today))}, kabla ya gharama za duka.`):t("Record a sale to see today's profit margin.")}</div>}
           </section>
-          <section className="sr-panel"><h2>{t("Stock at a glance","Muhtasari wa bidhaa")}</h2><p>{t("What to check before buying more.","Cha kuangalia kabla ya kununua zaidi.")}</p>{[
-            [t("Expiring soon or expired","Muda unaisha au umeisha"),items.filter(i=>i.stock_qty>0&&(i.expiring_soon||i.is_expired)).length,"Expiring Soon"],
-            [t("Buy more soon","Nunua zaidi karibuni"),items.filter(i=>i.reorder_soon&&!i.is_expired).length,"Reorder Soon"],
-            [t("Selling slowly or at risk","Zinauzika polepole au ziko hatarini"),priority.length,"All"],
-            [t("Active special offers","Ofa zinazoendelea"),items.filter(i=>i.recovery_campaigns?.some(c=>c.active)).length,"All"]
-          ].map(([label,count,target])=><button className="sr-home-alert" data-tone={count>0&&target==="Expiring Soon"?"warning":count>0&&target==="Reorder Soon"?"warning":"normal"} key={label} onClick={()=>{navigate("Inventory Workspace");setFilter(target);setPanel("Details");setShowAdd(false)}}><span>{label}</span><strong>{count} ›</strong></button>)}<div className="sr-home-note">{t("Money in stock","Mtaji kwenye bidhaa")}: <strong>{summary?formatMoney(capital):"—"}</strong></div></section>
+          <section className="sr-panel"><h2>{t("Stock at a glance")}</h2><p>{t("What to check before buying more.")}</p>{[
+            [t("Expiring soon or expired"),items.filter(i=>i.stock_qty>0&&(i.expiring_soon||i.is_expired)).length,"Expiring Soon"],
+            [t("Buy more soon"),items.filter(i=>i.reorder_soon&&!i.is_expired).length,"Reorder Soon"],
+            [t("Selling slowly or at risk"),priority.length,"All"],
+            [t("Active special offers"),items.filter(i=>i.recovery_campaigns?.some(c=>c.active)).length,"All"]
+          ].map(([label,count,target])=><button className="sr-home-alert" data-tone={count>0&&target==="Expiring Soon"?"warning":count>0&&target==="Reorder Soon"?"warning":"normal"} key={label} onClick={()=>{navigate("Inventory Workspace");setFilter(target);setPanel("Details");setShowAdd(false)}}><span>{label}</span><strong>{count} ›</strong></button>)}<div className="sr-home-note">{t("Money in stock")}: <strong>{summary?formatMoney(capital):"—"}</strong></div></section>
         </div>
-        <section className="sr-panel"><h2>{t("Needs your attention","Bidhaa zinazohitaji umakini")}</h2>{attention.length===0 && <p>{summary?t("Nothing urgent to review right now.","Hakuna jambo la haraka kwa sasa."):t("Stock data unavailable.","Taarifa za bidhaa hazipatikani.")}</p>}{attention.slice(0,8).map(i=><div className="sr-recommendation sr-attention" data-tone={i.is_expired?"danger":i.expiring_soon?"warning":"normal"} key={i.id}><div><strong>{productName(i)}</strong><p>{i.is_expired?t("Expired — do not sell","Muda umeisha — usiuze"):i.expiring_soon?(i.days_to_expiry===0?t("Expires today","Muda unaisha leo"):t(`Expires in ${i.days_to_expiry} days`,`Muda unaisha baada ya siku ${i.days_to_expiry}`)):i.reorder_soon?t("Check whether to buy more","Angalia kama unahitaji kununua zaidi"):labels[i.status]} · {i.stock_qty} {t("left","zimebaki")}</p></div><button style={styles.secondaryBtn} onClick={()=>{openInspector(i);navigate("Inventory Workspace");setPanel(i.reorder_soon||i.is_expired?"Details":"Recovery")}}>{t("Review","Angalia")}</button></div>)}</section>
+        <section className="sr-panel"><h2>{t("Needs your attention")}</h2>{attention.length===0 && <p>{summary?t("Nothing urgent to review right now."):t("Stock data unavailable.")}</p>}{attention.slice(0,8).map(i=><div className="sr-recommendation sr-attention" data-tone={i.is_expired?"danger":i.expiring_soon?"warning":"normal"} key={i.id}><div><strong>{productName(i)}</strong><p>{i.is_expired?t("Expired — do not sell"):i.expiring_soon?(i.days_to_expiry===0?t("Expires today"):t(`Expires in ${i.days_to_expiry} days`,`Muda unaisha baada ya siku ${i.days_to_expiry}`)):i.reorder_soon?t("Check whether to buy more"):labels[i.status]} · {i.stock_qty} {t("left")}</p></div><button style={styles.secondaryBtn} onClick={()=>{openInspector(i);navigate("Inventory Workspace");setPanel(i.reorder_soon||i.is_expired?"Details":"Recovery")}}>{t("Review")}</button></div>)}</section>
       </div>}
       {page === "Inventory Workspace" && quickSale && <section className={`sr-quick-sale${basketLines.length ? " sr-has-basket" : ""}`}>
-        <div className="sr-quick-heading"><h2>{t("Record a sale","Rekodi mauzo")}</h2><button style={styles.secondaryBtn} onClick={()=>{setQuickSale(false);setPanel("Details")}}>{t("Back to stock","Rudi kwenye bidhaa")}</button></div>
-        {!quickCheckout ? <><label className="sr-field">{t("Find a product","Tafuta bidhaa")}<input style={styles.input} value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} placeholder={t("Product name or code","Jina au namba ya bidhaa")}/></label>
-        <div className="sr-quick-list">{items.filter(i=>!i.is_expired&&i.stock_qty>0&&`${i.name} ${i.sku||""}`.toLowerCase().includes(searchQuery.toLowerCase().trim())).sort((a,b)=>a.name.localeCompare(b.name)).map(i=><article key={i.id} className="sr-quick-product"><div><strong>{productName(i)}</strong><small>{i.stock_qty} {t("left","zimebaki")}</small><b>{formatMoney(i.selling_price)}</b></div><div className="sr-quick-qty">{basket[i.id]>0?<><button disabled={submitting} aria-label={t("Remove one","Punguza moja")} onClick={()=>updateBasketQty(i.id,basket[i.id]-1,i.stock_qty)}>−</button><strong>{basket[i.id]}</strong><button disabled={submitting||basket[i.id]>=i.stock_qty} aria-label={t("Add one","Ongeza moja")} onClick={()=>addToBasket(i)}>+</button></>:<button disabled={submitting} onClick={()=>addToBasket(i)}>{t("+ Add","+ Ongeza")}</button>}</div></article>)}</div>
-        {items.filter(i=>!i.is_expired&&i.stock_qty>0&&`${i.name} ${i.sku||""}`.toLowerCase().includes(searchQuery.toLowerCase().trim())).length===0&&<p>{t("No available products found.","Hakuna bidhaa zinazopatikana.")}</p>}</>:<><button style={styles.secondaryBtn} onClick={()=>setQuickCheckout(false)}>{t("← Add more products","← Ongeza bidhaa nyingine")}</button><h3>{t("Customer basket","Kikapu cha mteja")}</h3>{basketLines.map(({item,qty,lineTotal})=><article key={item.id} className="sr-quick-product"><div><strong>{productName(item)}</strong><small>{formatMoney(lineTotal)}</small>{item.is_expired&&<small>{t("Expired — remove from basket","Muda umeisha — ondoa kwenye kikapu")}</small>}</div><div className="sr-quick-qty"><button disabled={submitting} aria-label={t("Remove one","Punguza moja")} onClick={()=>updateBasketQty(item.id,qty-1,item.stock_qty)}>−</button><strong>{qty}</strong><button disabled={submitting||item.is_expired||qty>=item.stock_qty} aria-label={t("Add one","Ongeza moja")} onClick={()=>addToBasket(item)}>+</button></div></article>)}{!basketLines.length&&<p>{t("Basket is empty.","Kikapu hakina bidhaa.")}</p>}</>}
-        {lastBasketBatch&&<button style={styles.secondaryBtn} disabled={submitting} onClick={handleUndoBasketSale}>{t("Undo last sale","Tengua mauzo ya mwisho")}</button>}
-        {basketLines.length > 0 && <div className="sr-quick-dock"><div><span>{basketTotalUnits} {t("items","bidhaa")}</span><strong>{formatMoney(basketTotalMoney)}</strong></div>{quickCheckout?<button disabled={submitting||!basketLines.length||basketLines.some(l=>l.item.is_expired)} onClick={handleCompleteBasketSale}>{submitting?t("Recording…","Inarekodi…"):t("Complete sale","Kamilisha mauzo")}</button>:<button disabled={!basketLines.length||submitting} onClick={()=>{setQuickCheckout(true);window.scrollTo(0,0)}}>{t("View basket","Angalia kikapu")}</button>}</div>}
+        <div className="sr-quick-heading"><h2>{t("Record a sale")}</h2><button style={styles.secondaryBtn} onClick={()=>{setQuickSale(false);setPanel("Details")}}>{t("Back to stock")}</button></div>
+        {!quickCheckout ? <><label className="sr-field">{t("Find a product")}<input style={styles.input} value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} placeholder={t("Product name or code")}/></label>
+        <div className="sr-quick-list">{items.filter(i=>!i.is_expired&&i.stock_qty>0&&`${i.name} ${i.sku||""}`.toLowerCase().includes(searchQuery.toLowerCase().trim())).sort((a,b)=>a.name.localeCompare(b.name)).map(i=><article key={i.id} className="sr-quick-product"><div><strong>{productName(i)}</strong><small>{i.stock_qty} {t("left")}</small><b>{formatMoney(i.selling_price)}</b></div><div className="sr-quick-qty">{basket[i.id]>0?<><button disabled={submitting} aria-label={t("Remove one")} onClick={()=>updateBasketQty(i.id,basket[i.id]-1,i.stock_qty)}>−</button><strong>{basket[i.id]}</strong><button disabled={submitting||basket[i.id]>=i.stock_qty} aria-label={t("Add one")} onClick={()=>addToBasket(i)}>+</button></>:<button disabled={submitting} onClick={()=>addToBasket(i)}>{t("+ Add")}</button>}</div></article>)}</div>
+        {items.filter(i=>!i.is_expired&&i.stock_qty>0&&`${i.name} ${i.sku||""}`.toLowerCase().includes(searchQuery.toLowerCase().trim())).length===0&&<p>{t("No available products found.")}</p>}</>:<><button style={styles.secondaryBtn} onClick={()=>setQuickCheckout(false)}>{t("← Add more products")}</button><h3>{t("Customer basket")}</h3>{basketLines.map(({item,qty,lineTotal})=><article key={item.id} className="sr-quick-product"><div><strong>{productName(item)}</strong><small>{formatMoney(lineTotal)}</small>{item.is_expired&&<small>{t("Expired — remove from basket")}</small>}</div><div className="sr-quick-qty"><button disabled={submitting} aria-label={t("Remove one")} onClick={()=>updateBasketQty(item.id,qty-1,item.stock_qty)}>−</button><strong>{qty}</strong><button disabled={submitting||item.is_expired||qty>=item.stock_qty} aria-label={t("Add one")} onClick={()=>addToBasket(item)}>+</button></div></article>)}{!basketLines.length&&<p>{t("Basket is empty.")}</p>}</>}
+        {lastBasketBatch&&<button style={styles.secondaryBtn} disabled={submitting} onClick={handleUndoBasketSale}>{t("Undo last sale")}</button>}
+        {basketLines.length > 0 && <div className="sr-quick-dock"><div><span>{basketTotalUnits} {t("items")}</span><strong>{formatMoney(basketTotalMoney)}</strong></div>{quickCheckout?<button disabled={submitting||!basketLines.length||basketLines.some(l=>l.item.is_expired)} onClick={handleCompleteBasketSale}>{submitting?t("Recording…"):t("Complete sale")}</button>:<button disabled={!basketLines.length||submitting} onClick={()=>{setQuickCheckout(true);window.scrollTo(0,0)}}>{t("View basket")}</button>}</div>}
       </section>}
-      {page === "Inventory Workspace" && !quickSale && <div className="sr-workspace-toolbar"><button style={styles.primaryBtn} aria-expanded={showAdd} onClick={()=>setShowAdd(v=>!v)}>{showAdd ? t("Close form","Funga") : t("+ Add product","+ Ongeza bidhaa")}</button><button style={styles.secondaryBtn} onClick={()=>setPanel("Basket")}>{t("Basket","Kikapu")} · {basketTotalUnits}</button></div>}
+      {page === "Inventory Workspace" && !quickSale && <div className="sr-workspace-toolbar"><button style={styles.primaryBtn} aria-expanded={showAdd} onClick={()=>setShowAdd(v=>!v)}>{showAdd ? t("Close form") : t("+ Add product")}</button><button style={styles.secondaryBtn} onClick={()=>setPanel("Basket")}>{t("Basket")} · {basketTotalUnits}</button></div>}
       {page === "Inventory Workspace" && !quickSale && showAdd && (
       <section style={styles.card}>
-        <h2 style={styles.sectionTitle}>{t("Add a product","Ongeza bidhaa")}</h2>
+        <h2 style={styles.sectionTitle}>{t("Add a product")}</h2>
         <form onSubmit={handleAddItem} style={styles.formGrid} className="sr-add-form">
-          <label className="sr-field"><span>{t("Product name","Jina la bidhaa")}</span><input
+          <label className="sr-field"><span>{t("Product name")}</span><input
             name="name"
             value={form.name}
             onChange={handleChange}
             required
             style={styles.input}
           /></label>
-          <label className="sr-field"><span>{t("Quantity in stock","Idadi ya bidhaa")}</span><input
+          <label className="sr-field"><span>{t("Quantity in stock")}</span><input
             name="stock_qty" inputMode="numeric"
             type="number"
             min="0"
@@ -522,7 +539,7 @@ export default function App() {
             required
             style={styles.input}
           /></label>
-          <label className="sr-field"><span>{t("Buying price per item (TSh)","Bei ya kununua bidhaa moja (TSh)")}</span><input
+          <label className="sr-field"><span>{t("Buying price per item (TSh)")}</span><input
             name="unit_cost" inputMode="decimal"
             type="number"
             step="0.01"
@@ -532,7 +549,7 @@ export default function App() {
             required
             style={styles.input}
           /></label>
-          <label className="sr-field"><span>{t("Selling price per item (TSh)","Bei ya kuuza bidhaa moja (TSh)")}</span><input
+          <label className="sr-field"><span>{t("Selling price per item (TSh)")}</span><input
             name="selling_price" inputMode="decimal"
             type="number"
             step="0.01"
@@ -543,7 +560,7 @@ export default function App() {
             style={styles.input}
           /></label>
           <label style={styles.dateFieldWrap}>
-            <span style={styles.dateHint}>{t("Expiry date (optional)","Tarehe ya mwisho wa matumizi (si lazima)")}</span>
+            <span style={styles.dateHint}>{t("Expiry date (optional)")}</span>
             <input
               name="expiry_date"
               type="date"
@@ -553,7 +570,7 @@ export default function App() {
             />
           </label>
           <button type="submit" disabled={submitting} style={styles.primaryBtn}>
-            {submitting ? t("Saving…","Inahifadhi…") : t("Add product","Ongeza bidhaa")}
+            {submitting ? t("Saving…") : t("Add product")}
           </button>
         </form>
       </section>
@@ -563,12 +580,12 @@ export default function App() {
         <section style={{ ...styles.card, flex: 2, minWidth: 0 }}>
           <div style={styles.tableHeader}>
             <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
-              {t("Products","Bidhaa")}
+              {t("Products")}
             </h2>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
               <input
                 type="search"
-                placeholder="Search item name..."
+                placeholder={t("Search item name...")}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 style={{ ...styles.input, padding: "6px 10px", minWidth: "170px" }}
@@ -578,9 +595,9 @@ export default function App() {
                 onChange={(e) => setSortBy(e.target.value)}
                 style={{ ...styles.input, padding: "6px 10px" }}
               >
-                <option value="risk">{t("Needs attention first","Zinazohitaji umakini kwanza")}</option>
-                <option value="cash">Sort: Most Cash Tied Up</option>
-                <option value="low_stock">Sort: Lowest Stock Left</option>
+                <option value="risk">{t("Needs attention first")}</option>
+                <option value="cash">{t("Sort: Most Cash Tied Up")}</option>
+                <option value="low_stock">{t("Sort: Lowest Stock Left")}</option>
               </select>
             </div>
           </div>
@@ -609,33 +626,33 @@ export default function App() {
           </div>
 
           {loading ? (
-            <p style={styles.muted}>Scanning inventory from Firestore...</p>
+            <p style={styles.muted}>{t("Scanning inventory from Firestore...")}</p>
           ) : visibleItems.length === 0 ? (
             <p style={styles.muted}>
-              No matching items found. Add a product or adjust your search/filter.
+              {t("No matching items found. Add a product or adjust your search/filter.")}
             </p>
           ) : (
-            <div className="sr-product-list">{visibleItems.map(item=><article key={item.id} className="sr-product" data-selected={selectedItem?.id===item.id}><button className="sr-item-link" onClick={()=>{openInspector(item);setPanel("Details")}}>{productName(item)}</button><strong>{formatMoney(item.selling_price)}</strong><small>{item.stock_qty} {t("left","zimebaki")} · {item.is_expired?t("Expired","Muda umeisha"):item.expiring_soon?t("Expiring soon","Muda unaisha karibuni"):labels[item.status]}</small><button style={styles.basketAddBtn} disabled={item.is_expired||item.stock_qty<=0||(basket[item.id]||0)>=item.stock_qty} onClick={()=>addToBasket(item)}>{t("+ Add","+ Ongeza")}{basket[item.id]?` (${basket[item.id]})`:""}</button></article>)}</div>
+            <div className="sr-product-list">{visibleItems.map(item=><article key={item.id} className="sr-product" data-selected={selectedItem?.id===item.id}><button className="sr-item-link" onClick={()=>{openInspector(item);setPanel("Details")}}>{productName(item)}</button><strong>{formatMoney(item.selling_price)}</strong><small>{item.stock_qty} {t("left")} · {item.is_expired?t("Expired"):item.expiring_soon?t("Expiring soon"):labels[item.status]}</small><button style={styles.basketAddBtn} disabled={item.is_expired||item.stock_qty<=0||(basket[item.id]||0)>=item.stock_qty} onClick={()=>addToBasket(item)}>{t("+ Add")}{basket[item.id]?` (${basket[item.id]})`:""}</button></article>)}</div>
           )}
         </section>
 
         {/* Right Side: Customer Basket + Streamlined Selected-Item Panel */}
-        <aside className="sr-inspector" style={{ flex: 1, minWidth: 0 }}>
-          <div className="sr-action-tabs" role="group" aria-label="Workspace actions">{["Details","Recovery","Basket"].map(t=><button key={t} aria-pressed={panel===t} onClick={()=>setPanel(t)}>{labels[t]}{t==="Basket" ? ` (${basketTotalUnits})` : ""}</button>)}</div>
+        <aside ref={inspectorRef} className="sr-inspector" style={{ flex: 1, minWidth: 0, scrollMarginTop: 12 }}> 
+          <div className="sr-action-tabs" role="group" aria-label={t("Workspace actions")}>{["Details","Recovery","Basket"].map(t=><button key={t} aria-pressed={panel===t} onClick={()=>setPanel(t)}>{labels[t]}{t==="Basket" ? ` (${basketTotalUnits})` : ""}</button>)}</div>
           {panel === "Basket" && (
           <div style={{ ...styles.card, border: "2px solid #0f172a" }}>
             <div style={styles.basketHeader}>
-              <h2 style={{ ...styles.sectionTitle, margin: 0 }}>{t("Customer basket","Kikapu cha mteja")}</h2>
+              <h2 style={{ ...styles.sectionTitle, margin: 0 }}>{t("Customer basket")}</h2>
               {basketLines.length > 0 && (
                 <button type="button" onClick={clearBasket} style={styles.clearLink}>
-                  Clear
+                  {t("Clear")}
                 </button>
               )}
             </div>
 
             {basketLines.length === 0 ? (
               <p style={styles.muted}>
-                Tap <strong>+ Basket</strong> on any row to add items, adjust quantities here, and see the total before completing the sale.
+                {t("Tap + Add to select products, adjust quantities and check the total before recording the sale.")}
               </p>
             ) : (
               <div>
@@ -673,11 +690,11 @@ export default function App() {
 
                 <div style={styles.basketTotalBox}>
                   <div style={styles.totalRow}>
-                    <span>{t("Total items:","Jumla ya bidhaa:")}</span>
-                    <strong>{basketTotalUnits} units</strong>
+                    <span>{t("Total items:")}</span>
+                    <strong>{basketTotalUnits} {t("units")}</strong>
                   </div>
                   <div style={{ ...styles.totalRow, fontSize: "18px", marginTop: "6px" }}>
-                    <span>Total to Pay:</span>
+                    <span>{t("Total to Pay:")}</span>
                     <strong style={{ color: "#15803d" }}>
                       {formatMoney(basketTotalMoney)}
                     </strong>
@@ -691,8 +708,8 @@ export default function App() {
                   style={styles.counterTapBtn}
                 >
                   {submitting
-                    ? "Recording..."
-                    : `Complete Sale (${formatMoney(basketTotalMoney)})`}
+                    ? t("Recording...")
+                    : t(`Complete Sale (${formatMoney(basketTotalMoney)})`,`Kamilisha mauzo (${formatMoney(basketTotalMoney)})`)}
                 </button>
               </div>
             )}
@@ -704,17 +721,17 @@ export default function App() {
                 disabled={submitting}
                 style={{ ...styles.secondaryBtn, width: "100%", marginTop: "8px" }}
               >
-                Undo Last Basket Sale ({formatMoney(lastBasketBatch.totalPaid)})
+                {t("Undo last sale")} ({formatMoney(lastBasketBatch.totalPaid)})
               </button>
             )}
           </div>
 
           )}
           {panel !== "Basket" && <div style={styles.card}>
-            <h2 style={styles.sectionTitle}>{panel === "Recovery" ? t("Special offers","Ofa maalum") : t("Product details","Maelezo ya bidhaa")}</h2>
+            <h2 style={styles.sectionTitle}>{panel === "Recovery" ? t("Special offers") : t("Product details")}</h2>
             {!selectedItem ? (
               <p style={styles.muted}>
-                Select a product from the inventory table to view its details or simulate recovery.
+                {t("Select a product from the inventory table to view its details or simulate recovery.")}
               </p>
             ) : (
               <div>
@@ -722,8 +739,8 @@ export default function App() {
                   <div>
                     <strong>{selectedItem.name}</strong>
                     <div style={styles.skuText}>
-                      <strong>{selectedItem.stock_qty} left</strong> · Sell:{" "}
-                      <strong>{formatMoney(selectedItem.selling_price)}</strong> · Cost:{" "}
+                      <strong>{selectedItem.stock_qty} {t("left")}</strong> · {t("Sell:")}{" "}
+                      <strong>{formatMoney(selectedItem.selling_price)}</strong> · {t("Cost:")}{" "}
                       {formatMoney(selectedItem.unit_cost)}
                     </div>
                   </div>
@@ -732,63 +749,63 @@ export default function App() {
                   </span>
                 </div>
 
-                {panel === "Recovery" && selectedItem.is_expired && <p style={styles.muted}>Expired stock cannot be sold. Review disposal options.</p>}
+                {panel === "Recovery" && selectedItem.is_expired && <p style={styles.muted}>{t("Expired stock cannot be sold. Review disposal options.")}</p>}
                 {panel === "Recovery" && !selectedItem.is_expired && !activeCampaign && <div style={styles.simBox}>
-                  <strong>{t("Set a discount","Weka punguzo")}</strong>
-                  <p>Discount: {discount}%</p>
-                  <input aria-label="Discount percentage" type="range" min="0" max={safeDiscount} disabled={submitting || safeDiscount === 0 || selectedItem.stock_qty <= 0} value={discount} onChange={e => setDiscount(Number(e.target.value))} style={{width:"100%"}} />
-                  <div>New unit price: {formatMoney(recoveryPrice)}</div>
-                  <div>Potential revenue: {formatMoney(selectedItem.stock_qty * recoveryPrice)}</div>
-                  <div>Gross profit: {formatMoney(selectedItem.stock_qty * (recoveryPrice-selectedItem.unit_cost))}</div>
-                  <div>Maximum whole-percent break-even discount: {safeDiscount}%</div>
-                  <small>Estimates assume all units sell; excludes operating expenses. Applying changes the live selling price, not historical sales.</small>
-                  <p>Suggested starting discount: {Math.min(safeDiscount, selectedItem.risk_score >= 70 ? 20 : selectedItem.risk_score >= 40 ? 10 : 5)}% (rule-based, not a demand prediction).</p>
-                  <label>Maximum duration <select value={recoveryDays} onChange={e=>setRecoveryDays(Number(e.target.value))}>{[1,3,7,14,30].map(d=><option key={d} value={d}>{d} days</option>)}</select></label>
-                  <p><small>Campaigns end no later than the end of the expiry date (EAT).</small></p>
-                  <button type="button" style={styles.counterTapBtn} disabled={submitting || loading || !canApplyRecovery} onClick={()=>saveRecoveryPrice()}>{t("Start offer","Anza ofa")}</button>
+                  <strong>{t("Set a discount")}</strong>
+                  <p>{t("Discount:")} {discount}%</p>
+                  <input aria-label={t("Discount percentage")} type="range" min="0" max={safeDiscount} disabled={submitting || safeDiscount === 0 || selectedItem.stock_qty <= 0} value={discount} onChange={e => setDiscount(Number(e.target.value))} style={{width:"100%"}} />
+                  <div>{t("New unit price:")} {formatMoney(recoveryPrice)}</div>
+                  <div>{t("Potential revenue:")} {formatMoney(selectedItem.stock_qty * recoveryPrice)}</div>
+                  <div>{t("Gross profit:")} {formatMoney(selectedItem.stock_qty * (recoveryPrice-selectedItem.unit_cost))}</div>
+                  <div>{t("Maximum whole-percent break-even discount:")} {safeDiscount}%</div>
+                  <small>{t("Estimates assume all units sell; excludes operating expenses. Applying changes the live selling price, not historical sales.")}</small>
+                  <p>{t("Suggested starting discount:")} {Math.min(safeDiscount, selectedItem.risk_score >= 70 ? 20 : selectedItem.risk_score >= 40 ? 10 : 5)}% (rule-based, not a demand prediction).</p>
+                  <label>{t("Maximum duration")} <select value={recoveryDays} onChange={e=>setRecoveryDays(Number(e.target.value))}>{[1,3,7,14,30].map(d=><option key={d} value={d}>{d} {t("days")}</option>)}</select></label>
+                  <p><small>{t("Campaigns end no later than the end of the expiry date (EAT).")}</small></p>
+                  <button type="button" style={styles.counterTapBtn} disabled={submitting || loading || !canApplyRecovery} onClick={()=>saveRecoveryPrice()}>{t("Start offer")}</button>
                 </div>}
                 {panel === "Recovery" && activeCampaign && <div style={styles.simBox}>
-                  <strong>{t("Active offer","Ofa inayoendelea")}</strong>
+                  <strong>{t("Active offer")}</strong>
                   <p>{formatMoney(activeCampaign.original_price)} → {formatMoney(activeCampaign.price)}</p>
-                  <p>Ends: {new Date(activeCampaign.effective_ends_at || activeCampaign.ends_at).toLocaleString("en-TZ", {timeZone:"Africa/Dar_es_Salaam"})} EAT</p>
+                  <p>{t("Ends:")} {new Date(activeCampaign.effective_ends_at || activeCampaign.ends_at).toLocaleString("en-TZ", {timeZone:"Africa/Dar_es_Salaam"})} EAT</p>
                   <div className="sr-recovery-performance">
-                    <strong>{activeCampaign.performance}</strong>
+                    <strong>{t(activeCampaign.performance)}</strong>
                     <div className="sr-recovery-metrics">
-                      <div><small>Campaign sales/day</small><b>{activeCampaign.campaign_daily_sales ?? "Pending"}</b></div>
-                      <div><small>Required sales/day</small><b>{activeCampaign.required_daily_sales ?? "—"}</b></div>
-                      <div><small>{t("Money recovered","Mtaji uliorejeshwa")}</small><b>{formatMoney(activeCampaign.capital_recovered)}</b></div>
-                      <div><small>Current stock cost</small><b>{formatMoney(activeCampaign.remaining_capital)}</b></div>
+                      <div><small>{t("Campaign sales/day")}</small><b>{activeCampaign.campaign_daily_sales ?? t("Pending")}</b></div>
+                      <div><small>{t("Required sales/day")}</small><b>{activeCampaign.required_daily_sales ?? "—"}</b></div>
+                      <div><small>{t("Money recovered")}</small><b>{formatMoney(activeCampaign.capital_recovered)}</b></div>
+                      <div><small>{t("Current stock cost")}</small><b>{formatMoney(activeCampaign.remaining_capital)}</b></div>
                     </div>
-                    {activeCampaign.campaign_daily_sales != null && activeCampaign.required_daily_sales > 0 && <progress aria-label="Clearance pace versus target" max={100} value={Math.min(100,100*activeCampaign.campaign_daily_sales/activeCampaign.required_daily_sales)}/>}
-                    <small>{t("The daily target uses remaining stock and time. Check offer progress after 24 hours.","Lengo la kila siku linategemea bidhaa na muda uliobaki. Angalia maendeleo ya ofa baada ya saa 24.")}</small>
+                    {activeCampaign.campaign_daily_sales != null && activeCampaign.required_daily_sales > 0 && <progress aria-label={t("Clearance pace versus target")} max={100} value={Math.min(100,100*activeCampaign.campaign_daily_sales/activeCampaign.required_daily_sales)}/>}
+                    <small>{t("The daily target uses remaining stock and time. Check offer progress after 24 hours.")}</small>
                   </div>
-                  <button style={styles.secondaryBtn} disabled={submitting || loading} onClick={()=>saveRecoveryPrice(true)}>{t("End offer","Maliza ofa")}</button>
+                  <button style={styles.secondaryBtn} disabled={submitting || loading} onClick={()=>saveRecoveryPrice(true)}>{t("End offer")}</button>
                 </div>}
-                {panel === "Recovery" && <div style={styles.simBox}><strong>{t("Special offer history","Historia ya ofa")}</strong>
-                  {!(selectedItem.recovery_campaigns || []).length && <p>No campaigns yet.</p>}
-                  {(selectedItem.recovery_campaigns || []).map(c=><div key={c.id} className="sr-campaign"><strong>{c.discount}% off · {c.active ? "Active" : "Ended"}</strong><small>{new Date(c.started_at).toLocaleDateString("en-TZ", {timeZone:"Africa/Dar_es_Salaam"})}</small><div>Units sold: {c.units}</div><div>Revenue: {formatMoney(c.revenue)}</div><div>Inventory cost recovered: {formatMoney(c.capital_recovered)}</div><div>Gross profit: {formatMoney(c.gross_profit)}</div></div>)}
+                {panel === "Recovery" && <div style={styles.simBox}><strong>{t("Special offer history")}</strong>
+                  {!(selectedItem.recovery_campaigns || []).length && <p>{t("No campaigns yet.")}</p>}
+                  {(selectedItem.recovery_campaigns || []).map(c=><div key={c.id} className="sr-campaign"><strong>{c.discount}% {t("off")} · {c.active ? t("Active") : t("Ended")}</strong><small>{new Date(c.started_at).toLocaleDateString("en-TZ", {timeZone:"Africa/Dar_es_Salaam"})}</small><div>{t("Units sold:")} {c.units}</div><div>{t("Revenue:")} {formatMoney(c.revenue)}</div><div>{t("Inventory cost recovered:")} {formatMoney(c.capital_recovered)}</div><div>{t("Gross profit:")} {formatMoney(c.gross_profit)}</div></div>)}
                 </div>}
                 <div style={styles.simBox}>
                   <div style={styles.simStats}>
                     <div>
-                      Profit per unit: <strong>{formatMoney(selectedItem.unit_profit)}</strong>
+                      {t("Profit per unit:")} <strong>{formatMoney(selectedItem.unit_profit)}</strong>
                     </div>
                     {!activeCampaign && <div>
-                      Safe max discount:{" "}
-                      <strong>{selectedItem.max_safe_discount_pct}% off</strong> (floor{" "}
+                      {t("Safe max discount:")}{" "}
+                      <strong>{selectedItem.max_safe_discount_pct}% {t("off")}</strong> ({t("minimum price")}{" "}
                       {formatMoney(selectedItem.unit_cost)})
                     </div>}
                     {selectedItem.expiry_date && (
                       <div>
-                        Expiry: <strong>{selectedItem.expiry_date}</strong> (
+                        {t("Expiry:")} <strong>{selectedItem.expiry_date}</strong> (
                         {selectedItem.days_to_expiry < 0
-                          ? "Expired"
-                          : `${selectedItem.days_to_expiry}d left`}
+                          ? t("Expired")
+                          : t(`${selectedItem.days_to_expiry} days left`,`Zimebaki siku ${selectedItem.days_to_expiry}`)}
                         )
                       </div>
                     )}
                     <div>
-                      {t("Average sold per day (last 7 days):","Wastani wa mauzo kwa siku (siku 7 zilizopita):")}{" "}
+                      {t("Average sold per day (last 7 days):")}{" "}
                       <strong>
                         {selectedItem.recent_daily_sales}
                       </strong>
@@ -803,7 +820,7 @@ export default function App() {
                   disabled={submitting || selectedItem.is_expired || selectedItem.stock_qty <= 0}
                   style={styles.counterTapBtn}
                 >
-                  Sell 1 Unit Now ({formatMoney(selectedItem.selling_price)})
+                  {t("Sell one item")} ({formatMoney(selectedItem.selling_price)})
                 </button>
 
                 <button
@@ -812,7 +829,7 @@ export default function App() {
                   disabled={submitting || !selectedItem.can_undo_sale}
                   style={{ ...styles.secondaryBtn, width: "100%", marginTop: "8px" }}
                 >
-                  Undo Last Sale
+                  {t("Undo Last Sale")}
                 </button>
 
                 {selectedItem.status !== "Healthy" ? (
@@ -826,15 +843,15 @@ export default function App() {
                       fontSize: "13px",
                     }}
                   >
-                    <strong>Restock Paused ({labels[selectedItem.status]})</strong>
+                    <strong>{t("Restock Paused")} ({labels[selectedItem.status]})</strong>
                     <div style={{ marginTop: "4px" }}>
-                      Adding stock is locked until sales speed recovers or expired stock is cleared.
+                      {t("Adding stock is locked until sales speed recovers or expired stock is cleared.")}
                     </div>
                   </div>
                 ) : (
                   <form onSubmit={handleRestock} style={styles.subBlock}>
                     <label style={styles.fieldLabel}>
-                      Add New Stock (Restock)
+                      {t("Add New Stock (Restock)")}
                       <input
                         type="number"
                         min="1"
@@ -848,7 +865,7 @@ export default function App() {
                       disabled={submitting}
                       style={{ ...styles.secondaryBtn, width: "100%", marginTop: "8px" }}
                     >
-                      Add Stock
+                      {t("Add Stock")}
                     </button>
                   </form>
                 )}
@@ -862,7 +879,7 @@ export default function App() {
                          onClick={() => setIsEditing(true)}
                         style={{ ...styles.secondaryBtn, flex: 1 }}
                       >
-                        Edit Item
+                        {t("Edit Item")}
                       </button>
                       <button
                         type="button"
@@ -870,7 +887,7 @@ export default function App() {
                         disabled={submitting}
                         style={styles.dangerBtn}
                       >
-                        Delete
+                        {t("Delete")}
                       </button>
                     </div>
                   ) : (
@@ -881,7 +898,7 @@ export default function App() {
                       <input
                         value={editName}
                         onChange={(e) => setEditName(e.target.value)}
-                        placeholder="Item Name"
+                        placeholder={t("Item Name")}
                         required
                         style={styles.input}
                       />
@@ -891,7 +908,7 @@ export default function App() {
                         min="0"
                         value={editCost}
                         onChange={(e) => setEditCost(e.target.value)}
-                        placeholder={`Buying Cost (${currency})`}
+                        placeholder={t(`Buying Cost (${currency})`,`Bei ya kununua (${currency})`)}
                         required
                         style={styles.input}
                       />
@@ -901,7 +918,7 @@ export default function App() {
                         min="0"
                         value={editSellingPrice}
                         onChange={(e) => setEditSellingPrice(e.target.value)}
-                        placeholder={`Selling Price (${currency})`}
+                        placeholder={t(`Selling Price (${currency})`,`Bei ya kuuza (${currency})`)}
                         required
                         style={styles.input}
                       />
@@ -917,14 +934,14 @@ export default function App() {
                           disabled={submitting}
                           style={{ ...styles.primaryBtn, flex: 1 }}
                         >
-                          Save Changes
+                          {t("Save Changes")}
                         </button>
                         <button
                           type="button"
                           onClick={() => setIsEditing(false)}
                           style={styles.secondaryBtn}
                         >
-                          Cancel
+                          {t("Cancel")}
                         </button>
                       </div>
                     </form>
