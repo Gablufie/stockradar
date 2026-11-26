@@ -1,5 +1,9 @@
 from forecast import forecast
 import os
+import logging
+from collections import deque
+from threading import Lock
+from time import monotonic
 from decimal import Decimal, ROUND_CEILING
 from math import isfinite
 import uuid
@@ -8,7 +12,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -16,14 +20,16 @@ app = FastAPI(title="StockRadar API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[x.strip() for x in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if x.strip()],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 cred_path = os.path.join(os.path.dirname(__file__), "serviceAccountKey.json")
 if not firebase_admin._apps:
-    if os.path.exists(cred_path):
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        firebase_admin.initialize_app()
+    elif os.path.exists(cred_path):
         cred = credentials.Certificate(cred_path)
         firebase_admin.initialize_app(cred)
     else:
@@ -31,6 +37,24 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 bearer = HTTPBearer(auto_error=False)
+logger = logging.getLogger("uvicorn.error")
+_rate_lock = Lock()
+_rate_windows = {}
+RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", "180"))
+
+def limit_uid(uid):
+    now = monotonic()
+    with _rate_lock:
+        for key in list(_rate_windows):
+            if _rate_windows[key][-1] <= now - 60:
+                del _rate_windows[key]
+        window = _rate_windows.setdefault(uid, deque())
+        while window and window[0] <= now - 60:
+            window.popleft()
+        if len(window) >= RATE_LIMIT:
+            raise HTTPException(429, "Too many requests", headers={"Retry-After": "60"})
+        window.append(now)
+
 
 def owner_uid(token: HTTPAuthorizationCredentials = Depends(bearer)):
     if token is None:
@@ -39,6 +63,7 @@ def owner_uid(token: HTTPAuthorizationCredentials = Depends(bearer)):
         claims = auth.verify_id_token(token.credentials, check_revoked=True)
     except Exception:
         raise HTTPException(401, "Authentication required")
+    limit_uid(claims["uid"])
     return claims["uid"]
 
 def shop_collection(uid, name):
@@ -76,29 +101,54 @@ class ItemInput(BaseModel):
     recovery_campaigns: list[dict] = []
 
 
-class ItemEditInput(BaseModel):
-    name: str | None = None
-    unit_cost: float | None = None
-    selling_price: float | None = None
+class PublicInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+class CreateItemInput(PublicInput):
+    sku: str = Field(default="", max_length=100)
+    name: str = Field(min_length=1, max_length=200)
+    stock_qty: int = Field(ge=0, le=100000000, strict=True)
+    unit_cost: float = Field(ge=0, le=1e12)
+    selling_price: float = Field(default=0, ge=0, le=1e12)
     expiry_date: str | None = None
 
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value):
+        if not value.strip():
+            raise ValueError("Name is required")
+        return value.strip()
 
-class SaleRecordInput(BaseModel):
-    units_sold: int = 1
+    @field_validator("expiry_date")
+    @classmethod
+    def valid_expiry(cls, value):
+        if value in (None, ""):
+            return value
+        if date.fromisoformat(value).isoformat() != value:
+            raise ValueError("Use YYYY-MM-DD")
+        return value
 
+class ItemEditInput(PublicInput):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    unit_cost: float | None = Field(default=None, ge=0, le=1e12)
+    selling_price: float | None = Field(default=None, ge=0, le=1e12)
+    expiry_date: str | None = None
+    _name = field_validator("name")(classmethod(lambda cls, v: CreateItemInput.clean_name(v) if v is not None else None))
+    _expiry = field_validator("expiry_date")(classmethod(lambda cls, v: CreateItemInput.valid_expiry(v)))
 
-class CheckoutLineItem(BaseModel):
-    item_id: str
-    units_sold: int
-    expected_price: float | None = None
+class SaleRecordInput(PublicInput):
+    units_sold: int = Field(default=1, ge=1, le=100000000, strict=True)
 
+class CheckoutLineItem(PublicInput):
+    item_id: str = Field(min_length=1, max_length=1500)
+    units_sold: int = Field(ge=1, le=100000000, strict=True)
+    expected_price: float | None = Field(default=None, ge=0, le=1e12)
 
-class CheckoutCartInput(BaseModel):
-    items: list[CheckoutLineItem]
+class CheckoutCartInput(PublicInput):
+    items: list[CheckoutLineItem] = Field(min_length=1, max_length=100)
 
-
-class RestockInput(BaseModel):
-    units_added: int
+class RestockInput(PublicInput):
+    units_added: int = Field(ge=1, le=100000000, strict=True)
 
 
 class ActionLogInput(BaseModel):
@@ -214,9 +264,9 @@ def campaign_report(c, events, now, item):
             "gross_profit": round(sum(e.units_sold * (e.unit_selling_price-e.unit_cost_at_sale) for e in sales), 2)}
 
 
-class RecoveryInput(BaseModel):
-    discount: int
-    days: int = 7
+class RecoveryInput(PublicInput):
+    discount: int = Field(ge=1, le=99, strict=True)
+    days: int = Field(default=7, ge=1, le=30, strict=True)
 
 
 @firestore.transactional
@@ -496,10 +546,10 @@ def health_check():
 
 
 @app.post("/api/items")
-def create_item(item: ItemInput, uid: str = Depends(owner_uid)):
+def create_item(item: CreateItemInput, uid: str = Depends(owner_uid)):
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
-        payload = item.model_dump()
+        payload = ItemInput(**item.model_dump()).model_dump()
         payload["recovery_campaigns"] = []
         if not payload.get("selling_price") or payload["selling_price"] <= 0:
             payload["selling_price"] = payload["unit_cost"]
@@ -514,7 +564,8 @@ def create_item(item: ItemInput, uid: str = Depends(owner_uid)):
         doc_ref.set(payload)
         saved = ItemInput(**payload)
         return {"message": "Item saved", "item": analyze_item(saved, doc_id=doc_ref.id)}
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
@@ -551,7 +602,8 @@ def edit_item_tx(tx, uid, item_id, payload):
         return {"message": "Item updated", "item": analyze_item(ItemInput(**merged), doc_id=item_id)}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
@@ -566,7 +618,8 @@ def delete_item(item_id: str, uid: str = Depends(owner_uid)):
         return {"message": "Item deleted", "id": item_id}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
@@ -580,7 +633,8 @@ def record_item_sale(item_id: str, payload: SaleRecordInput, uid: str = Depends(
         return {"message": f"Recorded {payload.units_sold} sold", "item": updated_item}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
@@ -610,15 +664,21 @@ def checkout_customer_cart(payload: CheckoutCartInput, uid: str = Depends(owner_
         }
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.post("/api/sales/undo-basket/{batch_id}")
 def undo_basket_sale(batch_id: str, uid: str = Depends(owner_uid)):
+    return undo_basket_sale_tx(db.transaction(), uid, batch_id)
+
+
+@firestore.transactional
+def undo_basket_sale_tx(tx, uid, batch_id):
     try:
         now = datetime.now(timezone.utc)
-        docs = shop_collection(uid, "items").stream()
+        docs = list(shop_collection(uid, "items").stream(transaction=tx))
         undone_count = 0
 
         for doc in docs:
@@ -635,7 +695,7 @@ def undo_basket_sale(batch_id: str, uid: str = Depends(owner_uid)):
             recent_pace, prior_pace = compute_rolling_paces(parsed_events, now)
             new_tracked = sum(e.units_sold for e in parsed_events)
 
-            doc.reference.update(
+            tx.update(doc.reference,
                 {
                     "stock_qty": restored_stock,
                     "units_sold_tracked": new_tracked,
@@ -653,15 +713,21 @@ def undo_basket_sale(batch_id: str, uid: str = Depends(owner_uid)):
         return {"message": f"Undid basket sale ({undone_count} units restored)"}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.post("/api/items/{item_id}/undo-sale")
 def undo_last_sale(item_id: str, uid: str = Depends(owner_uid)):
+    return undo_last_sale_tx(db.transaction(), uid, item_id)
+
+
+@firestore.transactional
+def undo_last_sale_tx(tx, uid, item_id):
     try:
         doc_ref = item_ref(uid, item_id)
-        doc = doc_ref.get()
+        doc = doc_ref.get(transaction=tx)
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Item not found")
 
@@ -684,7 +750,7 @@ def undo_last_sale(item_id: str, uid: str = Depends(owner_uid)):
             "last_sale_at": existing_events[-1].timestamp if existing_events else None,
             "sales_events": [e.model_dump() for e in existing_events],
         }
-        doc_ref.update(update_data)
+        tx.update(doc_ref, update_data)
 
         merged = {**raw, **update_data}
         parsed = ItemInput(**merged)
@@ -694,18 +760,24 @@ def undo_last_sale(item_id: str, uid: str = Depends(owner_uid)):
         }
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
 @app.patch("/api/items/{item_id}/restock")
 def restock_item(item_id: str, payload: RestockInput, uid: str = Depends(owner_uid)):
+    return restock_item_tx(db.transaction(), uid, item_id, payload)
+
+
+@firestore.transactional
+def restock_item_tx(tx, uid, item_id, payload):
     try:
         if payload.units_added < 1:
             raise HTTPException(status_code=400, detail="units_added must be at least 1")
 
         doc_ref = item_ref(uid, item_id)
-        doc = doc_ref.get()
+        doc = doc_ref.get(transaction=tx)
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Item not found")
 
@@ -718,7 +790,7 @@ def restock_item(item_id: str, payload: RestockInput, uid: str = Depends(owner_u
             )
 
         new_stock = int(raw.get("stock_qty", 0)) + int(payload.units_added)
-        doc_ref.update({"stock_qty": new_stock})
+        tx.update(doc_ref, {"stock_qty": new_stock})
 
         merged = {**raw, "stock_qty": new_stock}
         parsed = ItemInput(**merged)
@@ -728,7 +800,8 @@ def restock_item(item_id: str, payload: RestockInput, uid: str = Depends(owner_u
         }
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
@@ -763,7 +836,8 @@ def get_radar_overview(uid: str = Depends(owner_uid)):
             "profit_today": round(sum(r["profit_today"] for r in results), 2),
         }
         return {"summary": summary, "items": results}
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
@@ -775,7 +849,8 @@ def log_action(entry: ActionLogInput, uid: str = Depends(owner_uid)):
         doc_ref = shop_collection(uid, "action_logs").document()
         doc_ref.set(record)
         return {"id": doc_ref.id, **record}
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 
@@ -789,7 +864,8 @@ def list_actions(uid: str = Depends(owner_uid)):
             .stream()
         )
         return [{"id": d.id, **d.to_dict()} for d in docs]
-    except Exception as e:
+    except Exception:
+        logger.exception("StockRadar operation failed")
         raise HTTPException(status_code=500, detail="Server error")
 
 @app.get("/api/predictions")
